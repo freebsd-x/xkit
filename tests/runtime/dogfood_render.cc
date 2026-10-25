@@ -158,5 +158,30 @@ int main() {
         std::fprintf(stderr, "dogfood_render: dropdown popup did not open\n");
         return 6;
     }
+
+    // ── AdaptiveWidget: same content reflows row↔column by available width. ──────
+    // Render it on a wide canvas (two-pane row) and a narrow one (stacked column).
+    auto dumpAt = [&](const std::shared_ptr<Widget>& root, float width, const char* path) {
+        auto el = root->createElement(); el->mount(nullptr);
+        auto node = el->getRenderNode();
+        (void)node->layout(Constraints{0, width, 0, (float)H});
+        eng.paint(node);
+        auto buf = eng.readbackPixels(W, H);
+        FILE* f = std::fopen(path, "wb"); if (!f) return;
+        std::fprintf(f, "P6\n%u %u\n255\n", W, H);
+        for (uint32_t p : buf) { unsigned char rgb[3] = {(unsigned char)((p>>16)&0xFF),(unsigned char)((p>>8)&0xFF),(unsigned char)(p&0xFF)}; std::fwrite(rgb,1,3,f); }
+        std::fclose(f); std::fprintf(stderr, "dogfood_render: wrote %s\n", path);
+    };
+    auto box = [](Color c) { auto b = std::make_shared<ContainerWidget>(nullptr); b->setBackgroundColor(c); b->setFixedSize(150.0f, 110.0f); return b; };
+    auto makeAdaptive = [&]() {
+        auto wide = std::make_shared<FlexRow>(std::vector<std::shared_ptr<Widget>>{
+            box(Color{0.85f,0.25f,0.25f,1}), std::make_shared<Spacer>(16,1), box(Color{0.25f,0.7f,0.35f,1})});
+        auto compact = std::make_shared<FlexColumn>(std::vector<std::shared_ptr<Widget>>{
+            box(Color{0.85f,0.25f,0.25f,1}), std::make_shared<Spacer>(1,16), box(Color{0.25f,0.7f,0.35f,1})});
+        return std::make_shared<AdaptiveWidget>(std::vector<AdaptiveWidget::Breakpoint>{
+            {0.0f, compact}, {400.0f, wide}});
+    };
+    dumpAt(makeAdaptive(), 520.0f, "/tmp/dogfood-adaptive-wide.ppm");    // >=400 -> row
+    dumpAt(makeAdaptive(), 260.0f, "/tmp/dogfood-adaptive-narrow.ppm");  // <400  -> column
     return 0;
 }

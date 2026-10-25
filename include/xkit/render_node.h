@@ -857,6 +857,47 @@ public:
     }
 };
 
+// RenderAdaptive — picks ONE child by available width (responsive layout). The
+// child with the largest min-width <= the constraint width is laid out, sized,
+// painted, hit-tested and sent events; the rest are collapsed to 0×0 and hidden,
+// so the base paint/hitTest/spatial-event machinery skips them automatically.
+class RenderAdaptive : public RenderNode {
+public:
+    void setMinWidths(std::vector<float> mw) noexcept { min_widths_ = std::move(mw); }
+    [[nodiscard]] int activeIndex() const noexcept { return active_; }
+
+    [[nodiscard]] Size performLayout(const Constraints& constraints) noexcept override {
+        if (children_.empty()) return {0, 0};
+        active_ = pickActive(constraints.max_width_);
+        Size result{0, 0};
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (static_cast<int>(i) == active_) {
+                children_[i]->setVisibility(true);
+                children_[i]->setOffset({0, 0});
+                result = children_[i]->layout(constraints);
+            } else {
+                children_[i]->setVisibility(false);
+                (void)children_[i]->layout(Constraints::tight({0, 0}));  // collapse
+            }
+        }
+        return result;
+    }
+    void paintSelf(fbx::xrender::DisplayList&, Offset) noexcept override {}
+
+private:
+    [[nodiscard]] int pickActive(float avail) const noexcept {
+        int best = 0; float best_mw = -1.0f;
+        for (size_t i = 0; i < min_widths_.size() && i < children_.size(); ++i) {
+            if (min_widths_[i] <= avail && min_widths_[i] >= best_mw) {
+                best_mw = min_widths_[i]; best = static_cast<int>(i);
+            }
+        }
+        return best;
+    }
+    std::vector<float> min_widths_;
+    int active_{0};
+};
+
 // Root overlay layer: child[0] is the app content (laid out to fill the
 // viewport); children[1..] are popups/menus/dialogs placed above it at
 // anchor-relative positions. The element sets one `Placement` per overlay child

@@ -650,6 +650,31 @@ private:
     std::vector<std::shared_ptr<Widget>> children_;
 };
 
+// AdaptiveWidget — responsive layout. Holds several alternatives, each with a
+// minimum width; at layout time it shows the one with the largest min-width that
+// still fits the available width (the first entry, conventionally min-width 0, is
+// the compact fallback below every breakpoint). Lets a surface reflow for a narrow
+// tablet/portrait screen vs a wide desktop. Only the chosen child is laid out,
+// painted, hit-tested, and sent events.
+//
+//   auto layout = std::make_shared<AdaptiveWidget>(std::vector<AdaptiveWidget::Breakpoint>{
+//       {0.0f,   compactColumn},   // narrow / tablet-portrait
+//       {900.0f, wideTwoPane},     // desktop
+//   });
+class AdaptiveWidget : public Widget {
+public:
+    struct Breakpoint { float min_width; std::shared_ptr<Widget> child; };
+    explicit AdaptiveWidget(std::vector<Breakpoint> breakpoints) noexcept {
+        for (auto& b : breakpoints) { min_widths_.push_back(b.min_width); children_.push_back(std::move(b.child)); }
+    }
+    [[nodiscard]] std::shared_ptr<Element> createElement() noexcept override;
+    [[nodiscard]] const std::vector<std::shared_ptr<Widget>>& children() const noexcept { return children_; }
+    [[nodiscard]] const std::vector<float>& minWidths() const noexcept { return min_widths_; }
+private:
+    std::vector<std::shared_ptr<Widget>> children_;
+    std::vector<float> min_widths_;
+};
+
 class CheckboxWidget : public Widget {
 public:
     CheckboxWidget(bool checked, std::function<void(bool)> on_changed = nullptr)

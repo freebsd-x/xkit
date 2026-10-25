@@ -128,6 +128,7 @@ public:
         else if (auto flexR = std::dynamic_pointer_cast<FlexRow>(widget_)) children = flexR->children();
         else if (auto wrap = std::dynamic_pointer_cast<WrapRowWidget>(widget_)) children = wrap->children();
         else if (auto stack = std::dynamic_pointer_cast<StackWidget>(widget_)) children = stack->children();
+        else if (auto adapt = std::dynamic_pointer_cast<AdaptiveWidget>(widget_)) children = adapt->children();
 
         for (const auto& child_widget : children) {
             // Skip null children — containers commonly hold conditional entries
@@ -169,6 +170,7 @@ public:
         else if (auto flexR = std::dynamic_pointer_cast<FlexRow>(widget_))     raw = flexR->children();
         else if (auto wrap  = std::dynamic_pointer_cast<WrapRowWidget>(widget_)) raw = wrap->children();
         else if (auto stack = std::dynamic_pointer_cast<StackWidget>(widget_)) raw = stack->children();
+        else if (auto adapt = std::dynamic_pointer_cast<AdaptiveWidget>(widget_)) raw = adapt->children();
 
         // Drop null children so the comparison matches mount(), which skips them.
         // A stored null (e.g. a forward-declared widget slot never back-filled)
@@ -354,6 +356,12 @@ std::shared_ptr<Element> TabBarWidget::createElement() noexcept {
     return row->createElement();
 }
 std::shared_ptr<Element> StackWidget::createElement() noexcept { return std::make_shared<MultiChildElement>(shared_from_this(), std::make_shared<RenderStack>()); }
+
+std::shared_ptr<Element> AdaptiveWidget::createElement() noexcept {
+    auto rn = std::make_shared<RenderAdaptive>();
+    rn->setMinWidths(min_widths_);
+    return std::make_shared<MultiChildElement>(shared_from_this(), std::move(rn));
+}
 
 // OverlayHostElement — child[0] is the app content; children[1..] are the
 // process's active overlays (OverlayManager), reconciled each frame by content-
