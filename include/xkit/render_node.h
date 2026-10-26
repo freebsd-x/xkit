@@ -152,6 +152,8 @@ public:
     void setAlignment(Alignment a) noexcept { alignment_ = a; }
     void setStackAnchor(StackAnchor a) noexcept { stack_anchor_ = a; }
     [[nodiscard]] StackAnchor stackAnchor() const noexcept { return stack_anchor_; }
+    void setMinTouchSize(float px) noexcept { min_touch_ = px; }
+    [[nodiscard]] float minTouchSize() const noexcept { return min_touch_; }
     void setVisibility(bool v) noexcept { visible_ = v; }
     [[nodiscard]] bool isVisible() const noexcept { return visible_; }
 
@@ -213,6 +215,7 @@ protected:
     float borderRadius_{0};
     Alignment alignment_{Alignment::Start};
     StackAnchor stack_anchor_{StackAnchor::Inherit};
+    float min_touch_{0.0f};
     bool visible_{true};
 
     // Flex container properties
@@ -439,10 +442,12 @@ public:
             // Shrink-wrap to content + padding unless an explicit size was set.
             // desiredHeight_ acts only as a minimum height (tap target); the
             // 100px default width is dropped so icon/clock buttons stay compact.
+            // min_touch_ floors BOTH dimensions so a small icon button still
+            // presents a comfortable tap target (child stays centred below).
             Size s = hasFixedSize_
                 ? Size{fixedWidth_, fixedHeight_}
-                : Size{childSize.width_  + padding_ * 2.0f,
-                       std::max(childSize.height_ + padding_ * 2.0f, desiredHeight_)};
+                : Size{std::max(childSize.width_  + padding_ * 2.0f, min_touch_),
+                       std::max(std::max(childSize.height_ + padding_ * 2.0f, desiredHeight_), min_touch_)};
             s = constraints.clamp(s);
             if (!children_.empty()) {
                 float ox = std::max(padding_, (s.width_  - childSize.width_)  * 0.5f);

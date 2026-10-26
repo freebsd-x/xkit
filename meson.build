@@ -61,6 +61,7 @@ if gtest_dep.found()
   foreach t : [
     ['xkit_scroll_view',   'tests/unit/scroll_view_test.cc',   'xkit ScrollView'],
     ['xkit_adaptive',      'tests/unit/adaptive_test.cc',      'xkit Adaptive'],
+    ['xkit_touch_target',  'tests/unit/touch_target_test.cc',  'xkit TouchTarget'],
     ['xkit_text_input',    'tests/unit/text_input_test.cc',    'xkit TextInput'],
     ['xkit_image',         'tests/unit/image_test.cc',         'xkit ImageWidget'],
     ['xkit_layout',        'tests/unit/layout_test.cc',        'xkit Layout'],

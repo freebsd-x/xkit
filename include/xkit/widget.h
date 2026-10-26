@@ -42,6 +42,11 @@ public:
     // Placement within a parent StackWidget (default Inherit = follow the stack).
     void setStackAnchor(StackAnchor a) noexcept { stack_anchor_ = a; }
     [[nodiscard]] StackAnchor stackAnchor() const noexcept { return stack_anchor_; }
+    // Minimum touch target in logical px (both dimensions). A button floors its
+    // box to this size (content stays centred) so small icon controls stay
+    // comfortably tappable (HIG/Material ~44–48px). 0 = no minimum.
+    void setMinTouchSize(float px) noexcept { min_touch_size_ = px; }
+    [[nodiscard]] float minTouchSize() const noexcept { return min_touch_size_; }
 
     void setVisibility(bool v) noexcept { visible_ = v; }
     [[nodiscard]] bool isVisible() const noexcept { return visible_; }
@@ -109,6 +114,7 @@ protected:
     bool hasFixedSize_{false};
     Alignment alignment_{Alignment::Start};
     StackAnchor stack_anchor_{StackAnchor::Inherit};
+    float min_touch_size_{0.0f};
     bool visible_{true};
     bool disabled_{false};
     CursorShape cursor_{CursorShape::Inherit};
