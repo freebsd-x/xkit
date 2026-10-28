@@ -1470,6 +1470,25 @@ static void undoCheckpoint(UndoHistory& h, const TextEditState& e,
 // for its phrase, before the boundary goes in. Called before the keystroke's
 // own checkpoint, so the first undo drops the boundary and the second restores
 // the shortcut. Callers skip password fields.
+// Focused text fields activate the compositor IME; locale 0 means "the system
+// default input method" (Settings → Input Method). Password fields never get
+// one (they deactivate instead).
+static void imeDeactivate() noexcept {
+    auto* bus = XApplication::getBus();
+    if (!bus) return;
+    bus->Call("com.freebsdx.IME", static_cast<uint32_t>(shared::IMEOpcode::Deactivate), {},
+              [](const shared::XBusMessage&) {});
+}
+static void imeActivate(uint32_t locale, bool password) noexcept {
+    auto* bus = XApplication::getBus();
+    if (!bus) return;
+    if (password) { imeDeactivate(); return; }
+    shared::IMEActivateRequest req{};
+    req.locale_ = locale;
+    bus->Call("com.freebsdx.IME", static_cast<uint32_t>(shared::IMEOpcode::Activate),
+              {reinterpret_cast<const uint8_t*>(&req), sizeof(req)}, [](const shared::XBusMessage&) {});
+}
+
 static void expandReplacement(TextEditState& e, UndoHistory& h, EditKind& last, char boundary) {
     if (!shared::textreplace::isBoundary(boundary) || e.hasSelection()) return;
     std::size_t begin = 0;
@@ -1757,24 +1776,9 @@ public:
 private:
     void sendImeActivate() noexcept {
         auto tw = std::static_pointer_cast<TextInputWidget>(widget_);
-        auto* bus = XApplication::getBus();
-        if (!bus || tw->locale() == 0) return;
-        shared::IMEActivateRequest req{};
-        req.locale_ = tw->locale();
-        bus->Call("com.freebsdx.IME",
-                  static_cast<uint32_t>(shared::IMEOpcode::Activate),
-                  {reinterpret_cast<const uint8_t*>(&req), sizeof(req)},
-                  [](const shared::XBusMessage&) {});
+        imeActivate(tw ? tw->locale() : 0, tw && tw->passwordMode());
     }
-
-    void sendImeDeactivate() noexcept {
-        auto* bus = XApplication::getBus();
-        if (!bus) return;
-        bus->Call("com.freebsdx.IME",
-                  static_cast<uint32_t>(shared::IMEOpcode::Deactivate),
-                  {},
-                  [](const shared::XBusMessage&) {});
-    }
+    void sendImeDeactivate() noexcept { imeDeactivate(); }
 
     // The rendered form of the buffer (masked per byte in password mode).
     [[nodiscard]] std::string displayString() const {
@@ -1914,11 +1918,12 @@ public:
         apply_widget_props(renderNode_, widget_);
         refresh(/*force=*/true);
     }
-    void unmount() noexcept override { renderNode_->clearChildren(); parent_.reset(); }
+    void unmount() noexcept override { imeDeactivate(); renderNode_->clearChildren(); parent_.reset(); }
 
     [[nodiscard]] bool handleEvent(const shared::InputMessage& event) noexcept override {
         if (event.type_ == shared::InputEventType::MouseButton && event.char_value_ != 0) {
             XApplication::requestFocus(shared_from_this());
+            imeActivate(0, false);   // the system default input method
             goal_valid_ = false;   // a click sets a new horizontal goal
             last_kind_ = EditKind::Boundary;   // and ends the current undo group
             // Snapshot the line geometry now (nodes still carry valid offsets); a
