@@ -6,6 +6,7 @@
 #include "xkit/application.h"
 #include "xkit/clipboard.h"
 #include "xrender/image_decoder.h"
+#include "shared/text_replace.h"
 #include <iostream>
 #include <cmath>
 #include <cstdio>
@@ -13,6 +14,10 @@
 #include <unistd.h>
 #include <climits>
 #include <unordered_map>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <sys/stat.h>
 #if defined(__FreeBSD__)
 #include <sys/sysctl.h>
 #endif
@@ -20,6 +25,29 @@
 namespace fbx::xkit {
 
 namespace {
+
+// The user's text replacements (Settings → Text Replacement), re-read when the
+// file changes; stat'd at most once a second since this runs per keystroke.
+const std::vector<shared::textreplace::Entry>& textReplacements() {
+    static std::vector<shared::textreplace::Entry> entries;
+    static time_t mtime = -1;
+    static auto last_check = std::chrono::steady_clock::time_point{};
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_check < std::chrono::seconds(1)) return entries;
+    last_check = now;
+    const char* home = std::getenv("HOME");
+    if (!home) return entries;
+    std::string path = shared::textreplace::filePath(home);
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) { entries.clear(); mtime = -1; return entries; }
+    if (st.st_mtime == mtime) return entries;
+    mtime = st.st_mtime;
+    std::ifstream f(path);
+    std::stringstream body;
+    body << f.rdbuf();
+    entries = shared::textreplace::parse(body.str());
+    return entries;
+}
 
 // Directory containing the running executable, or "" if it can't be resolved.
 // Mirrors engine.cc's helper so asset lookups don't depend on the cwd — the
@@ -1437,6 +1465,20 @@ static void undoCheckpoint(UndoHistory& h, const TextEditState& e,
     if (k != last || k == EditKind::Boundary) h.push({e.text, e.cursor, e.anchor});
     last = k;
 }
+
+// Typing a boundary right after a text-replacement shortcut swaps the shortcut
+// for its phrase, before the boundary goes in. Called before the keystroke's
+// own checkpoint, so the first undo drops the boundary and the second restores
+// the shortcut. Callers skip password fields.
+static void expandReplacement(TextEditState& e, UndoHistory& h, EditKind& last, char boundary) {
+    if (!shared::textreplace::isBoundary(boundary) || e.hasSelection()) return;
+    std::size_t begin = 0;
+    const std::string* phrase = shared::textreplace::match(textReplacements(), e.text, e.cursor, begin);
+    if (!phrase) return;
+    undoCheckpoint(h, e, EditKind::Boundary, last);
+    e.anchor = begin;          // select the shortcut, then replace it
+    e.insert(*phrase);
+}
 static bool applyUndo(UndoHistory& h, TextEditState& e) {
     EditSnapshot cur{e.text, e.cursor, e.anchor}, out;
     if (!h.undo(cur, out)) return false;
@@ -1676,6 +1718,8 @@ public:
             else if   (event.char_value_ != 0) {                                            // Printable
                 char ch = static_cast<char>(event.char_value_);
                 EditKind k = (ch == ' ' || ch == '\t') ? EditKind::Boundary : EditKind::Insert;
+                if (auto tw = std::static_pointer_cast<TextInputWidget>(widget_); !tw || !tw->passwordMode())
+                    expandReplacement(edit_, history_, last_kind_, ch);
                 undoCheckpoint(history_, edit_, k, last_kind_);
                 edit_.insert(ch);
                 commit();
@@ -1984,6 +2028,7 @@ public:
             else if   (event.char_value_ != 0) {                                          // Printable
                 char ch = static_cast<char>(event.char_value_);
                 EditKind k = (ch == ' ' || ch == '\t') ? EditKind::Boundary : EditKind::Insert;
+                expandReplacement(edit_, history_, last_kind_, ch);
                 undoCheckpoint(history_, edit_, k, last_kind_);
                 edit_.insert(ch);
                 commitEdit();

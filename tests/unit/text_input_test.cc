@@ -3,7 +3,11 @@
 #include "xkit/render_node.h"
 #include "xkit/application.h"
 #include <gtest/gtest.h>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 
 namespace fbx::xkit::testing {
 
@@ -109,6 +113,46 @@ TEST_F(TextInputTest, PrintableCharFiresOnChangeNotSubmit) {
     EXPECT_TRUE(element->handleEvent(key));
     EXPECT_EQ(change_count, 1);
     EXPECT_EQ(submit_count, 0);
+}
+
+// Text replacement (Settings → Text Replacement): a shortcut followed by a
+// boundary becomes its phrase — but never in a password field.
+namespace {
+void typeInto(const std::shared_ptr<Element>& el, std::string_view s) {
+    for (char c : s)
+        (void)el->handleEvent({ .type_ = shared::InputEventType::KeyPress,
+                                .value_a_ = 0, .value_b_ = 1, .char_value_ = static_cast<int32_t>(c) });
+}
+}  // namespace
+
+TEST_F(TextInputTest, ShortcutExpandsOnBoundaryButNotInPasswordFields) {
+    char tmpl[] = "/tmp/xkit-textrepl.XXXXXX";
+    ASSERT_NE(::mkdtemp(tmpl), nullptr);
+    std::string home = tmpl;
+    std::filesystem::create_directories(home + "/.config/freebsdx");
+    std::ofstream(home + "/.config/freebsdx/text-replacements") << "omw\tOn my way\n";
+    std::string old_home = std::getenv("HOME") ? std::getenv("HOME") : "";
+    ::setenv("HOME", home.c_str(), 1);
+
+    auto w = std::make_shared<TextInputWidget>("");
+    auto el = w->createElement();
+    (void)el->handleEvent({ .type_ = shared::InputEventType::MouseButton,
+                            .value_a_ = 1, .value_b_ = 1, .char_value_ = 1 });
+    typeInto(el, "ok omw.");
+    EXPECT_EQ(w->text(), "ok On my way.");
+    typeInto(el, " nomw ");                       // only whole words expand
+    EXPECT_EQ(w->text(), "ok On my way. nomw ");
+
+    auto pw = std::make_shared<TextInputWidget>("");
+    pw->setPasswordMode(true);
+    auto pel = pw->createElement();
+    (void)pel->handleEvent({ .type_ = shared::InputEventType::MouseButton,
+                             .value_a_ = 1, .value_b_ = 1, .char_value_ = 1 });
+    typeInto(pel, "omw ");
+    EXPECT_EQ(pw->text(), "omw ");
+
+    if (old_home.empty()) ::unsetenv("HOME"); else ::setenv("HOME", old_home.c_str(), 1);
+    std::filesystem::remove_all(home);
 }
 
 } // namespace fbx::xkit::testing
