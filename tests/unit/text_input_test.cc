@@ -155,4 +155,17 @@ TEST_F(TextInputTest, ShortcutExpandsOnBoundaryButNotInPasswordFields) {
     std::filesystem::remove_all(home);
 }
 
+// Key events carry the keyboard layout's Unicode character; non-ASCII ones
+// are inserted as UTF-8, not truncated to a byte.
+TEST_F(TextInputTest, NonAsciiLayoutCharactersInsertAsUtf8) {
+    auto w = std::make_shared<TextInputWidget>("");
+    auto el = w->createElement();
+    (void)el->handleEvent({ .type_ = shared::InputEventType::MouseButton,
+                            .value_a_ = 1, .value_b_ = 1, .char_value_ = 1 });
+    for (int32_t cp : {0x63, 0x61, 0x66, 0xE9, 0x20, 0xDF})   // "café ß"
+        (void)el->handleEvent({ .type_ = shared::InputEventType::KeyPress,
+                                .value_a_ = 0, .value_b_ = 1, .char_value_ = cp });
+    EXPECT_EQ(w->text(), "caf\xC3\xA9 \xC3\x9F");
+}
+
 } // namespace fbx::xkit::testing

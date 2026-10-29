@@ -1470,6 +1470,24 @@ static void undoCheckpoint(UndoHistory& h, const TextEditState& e,
 // for its phrase, before the boundary goes in. Called before the keystroke's
 // own checkpoint, so the first undo drops the boundary and the second restores
 // the shortcut. Callers skip password fields.
+// A Unicode codepoint as UTF-8 (key events carry the layout's character).
+static std::string utf8Of(uint32_t cp) {
+    std::string s;
+    if (cp < 0x80) s += static_cast<char>(cp);
+    else if (cp < 0x800) { s += static_cast<char>(0xC0 | (cp >> 6)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) {
+        s += static_cast<char>(0xE0 | (cp >> 12));
+        s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        s += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x110000) {
+        s += static_cast<char>(0xF0 | (cp >> 18));
+        s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        s += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+    return s;
+}
+
 // Focused text fields activate the compositor IME; locale 0 means "the system
 // default input method" (Settings → Input Method). Password fields never get
 // one (they deactivate instead).
@@ -1735,12 +1753,15 @@ public:
             else if   (kc == 111) { undoCheckpoint(history_, edit_, EditKind::Delete, last_kind_);
                                     edit_.deleteForward();  commit();       return true; }  // Delete
             else if   (event.char_value_ != 0) {                                            // Printable
-                char ch = static_cast<char>(event.char_value_);
+                // char_value_ is a Unicode codepoint (the keyboard layout's
+                // character): insert it as UTF-8, not as one truncated byte.
+                const uint32_t cp = static_cast<uint32_t>(event.char_value_);
+                const char ch = cp < 0x80 ? static_cast<char>(cp) : '\0';
                 EditKind k = (ch == ' ' || ch == '\t') ? EditKind::Boundary : EditKind::Insert;
                 if (auto tw = std::static_pointer_cast<TextInputWidget>(widget_); !tw || !tw->passwordMode())
                     expandReplacement(edit_, history_, last_kind_, ch);
                 undoCheckpoint(history_, edit_, k, last_kind_);
-                edit_.insert(ch);
+                edit_.insert(utf8Of(cp));
                 commit();
                 return true;
             }
@@ -2031,11 +2052,12 @@ public:
             else if   (kc == 111) { undoCheckpoint(history_, edit_, EditKind::Delete, last_kind_);
                                     edit_.deleteForward();  commitEdit(); return true; }  // Delete
             else if   (event.char_value_ != 0) {                                          // Printable
-                char ch = static_cast<char>(event.char_value_);
+                const uint32_t cp = static_cast<uint32_t>(event.char_value_);
+                const char ch = cp < 0x80 ? static_cast<char>(cp) : '\0';
                 EditKind k = (ch == ' ' || ch == '\t') ? EditKind::Boundary : EditKind::Insert;
                 expandReplacement(edit_, history_, last_kind_, ch);
                 undoCheckpoint(history_, edit_, k, last_kind_);
-                edit_.insert(ch);
+                edit_.insert(utf8Of(cp));
                 commitEdit();
                 return true;
             }
