@@ -1279,6 +1279,7 @@ public:
         auto text_widget = std::static_pointer_cast<TextWidget>(widget_);
         auto node = std::make_shared<RenderText>(text_widget->text(), text_widget->font_size());
         if (text_widget->hasColor()) node->setColor(text_widget->color());
+        applyFont(*node, *text_widget);
         renderNode_ = node;
         apply_widget_props(renderNode_, widget_);
     }
@@ -1302,6 +1303,15 @@ public:
         auto text_node = std::static_pointer_cast<RenderText>(renderNode_);
         if (text_node->text() != text_widget->text()) text_node->setText(text_widget->text());
         if (text_widget->hasColor()) text_node->setColor(text_widget->color());
+        applyFont(*text_node, *text_widget);
+    }
+
+    // setFontFamily / setFontWeight / setFontStyle never reached the renderer
+    // (every label drew in the default regular face).
+    static void applyFont(RenderText& node, const TextWidget& w) noexcept {
+        node.setFontFamily(w.fontFamily());
+        node.setFontWeight(static_cast<fbx::xrender::FontWeight>(w.fontWeight() ? w.fontWeight() : 400));   // 0 = default
+        node.setFontStyle(w.fontStyle() ? fbx::xrender::FontStyle::Italic : fbx::xrender::FontStyle::Normal);
     }
 
     void onThemeChanged(const Theme& theme) noexcept override {
@@ -2422,6 +2432,10 @@ public:
     }
     void unmount() noexcept override { parent_.reset(); }
     void syncState() noexcept override {
+        // A value set from code (saved settings, a broadcast) reaches the
+        // render node; it used to keep the value it was created with.
+        std::static_pointer_cast<RenderSwitch>(renderNode_)->setValue(
+            std::static_pointer_cast<SwitchWidget>(widget_)->value());
         bool disabled = widget_->isDisabled();
         renderNode_->setCursor(disabled ? CursorShape::NotAllowed
                                         : CursorShape::Pointer);
@@ -2482,6 +2496,10 @@ public:
     }
     void unmount() noexcept override { parent_.reset(); }
     void syncState() noexcept override {
+        // A value set from code (saved settings, a broadcast) reaches the
+        // render node; it used to keep the value it was created with.
+        std::static_pointer_cast<RenderSlider>(renderNode_)->setValue(
+            std::static_pointer_cast<SliderWidget>(widget_)->value());
         bool disabled = widget_->isDisabled();
         renderNode_->setCursor(disabled ? CursorShape::NotAllowed
                                         : CursorShape::Pointer);
@@ -2569,6 +2587,12 @@ public:
         auto w = std::static_pointer_cast<ProgressBarWidget>(widget_);
         std::static_pointer_cast<RenderProgressBar>(renderNode_)->setValue(w->value());
         apply_widget_props(renderNode_, widget_);
+    }
+    void syncState() noexcept override {
+        // Progress set after mounting reaches the bar (it froze at its first value).
+        std::static_pointer_cast<RenderProgressBar>(renderNode_)->setValue(
+            std::static_pointer_cast<ProgressBarWidget>(widget_)->value());
+        Element::syncState();
     }
     void unmount() noexcept override { parent_.reset(); }
 };

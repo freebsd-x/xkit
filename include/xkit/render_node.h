@@ -31,7 +31,19 @@ public:
     virtual ~RenderNode() noexcept = default;
 
     [[nodiscard]] Size layout(const Constraints& constraints) noexcept {
-        if (hasFixedSize_) {
+        if (hasFixedSize_ && (fixedWidth_ > 0.0f) != (fixedHeight_ > 0.0f)) {
+            // One axis fixed, the other 0: "size to content on that axis"
+            // (setFixedSize(0, 26) = auto width, 26 px tall). Taken literally,
+            // a 0-wide toolbar or button collapsed and its contents piled up.
+            Constraints c = constraints;
+            if (fixedWidth_ > 0.0f) {
+                c.min_width_ = c.max_width_ = std::clamp(fixedWidth_, constraints.min_width_, constraints.max_width_);
+            } else {
+                c.min_height_ = c.max_height_ = std::clamp(fixedHeight_, constraints.min_height_, constraints.max_height_);
+            }
+            size_ = c.clamp(performLayout(c));
+        } else if (hasFixedSize_) {
+            // Both fixed (setFixedSize(0, 0) collapses a hidden panel on purpose).
             size_ = constraints.clamp({fixedWidth_, fixedHeight_});
             // Fixed size already decided; performLayout runs for its side effects
             // (laying out children), so its returned size is intentionally dropped.
@@ -275,6 +287,13 @@ protected:
         float total_flex_grow = 0.0f;
         float total_static_main = 0.0f; // sum of non-flexible main sizes + all margins
         std::vector<Size> sizes(n);
+        // Children that filled the unbounded main axis they were measured with
+        // (a slider, divider or progress bar in a row): they want to fill, so
+        // they share the free space like flex_grow 1 — instead of 100000 px
+        // that pushed their siblings (a "100%" label, a button) off-screen.
+        // Only when this container's own main axis is bounded.
+        std::vector<char> auto_flex(n, 0);
+        const bool main_bounded = avail_main < 50000.0f;
 
         for (int i = 0; i < n; ++i) {
             auto* c = children[i].get();
@@ -283,8 +302,12 @@ protected:
                 // Reserve space for margins; content measured in pass 2
                 total_static_main += mms(c) + mme(c);
             } else {
-                bool stretch = cross_align == CrossAxisAlignment::Stretch;
-                float cross_max = stretch ? std::max(0.0f, avail_cross - mcs(c) - mce(c)) : 100000.0f;
+                // The cross axis is bounded by the container's own extent: a
+                // child may be narrower, never wider. (It used to get 100000
+                // unless the container stretched, so a row holding a flexible
+                // spacer grew to 100000 px and everything right of the spacer —
+                // toggles, values, buttons — was laid out off-screen.)
+                float cross_max = std::max(0.0f, avail_cross - mcs(c) - mce(c));
                 Constraints cc;
                 if (c->flex_basis_ >= 0.0f) {
                     float b = c->flex_basis_;
@@ -297,7 +320,13 @@ protected:
                        : Constraints{0.0f, cross_max, 0.0f, 100000.0f};
                 }
                 sizes[i] = c->layout(cc);
-                total_static_main += mainOf(sizes[i]) + mms(c) + mme(c);
+                if (main_bounded && c->flex_basis_ < 0.0f && mainOf(sizes[i]) >= 50000.0f) {
+                    auto_flex[i] = 1;
+                    total_flex_grow += 1.0f;
+                    total_static_main += mms(c) + mme(c);
+                } else {
+                    total_static_main += mainOf(sizes[i]) + mms(c) + mme(c);
+                }
             }
         }
 
@@ -307,18 +336,16 @@ protected:
 
         for (int i = 0; i < n; ++i) {
             auto* c = children[i].get();
-            if (c->flex_grow_ <= 0.0f) continue;
+            const float grow = auto_flex[i] ? 1.0f : c->flex_grow_;
+            if (grow <= 0.0f) continue;
 
             float basis = c->flex_basis_ >= 0.0f ? c->flex_basis_ : 0.0f;
             float alloc = basis + (total_flex_grow > 0.0f
-                ? (free_space / total_flex_grow) * c->flex_grow_
+                ? (free_space / total_flex_grow) * grow
                 : 0.0f);
             alloc = std::max(0.0f, alloc);
 
-            bool stretch = cross_align == CrossAxisAlignment::Stretch;
-            float cross_max = stretch
-                ? std::max(0.0f, avail_cross - mcs(c) - mce(c))
-                : 100000.0f;
+            float cross_max = std::max(0.0f, avail_cross - mcs(c) - mce(c));   // see pass 1
 
             Constraints cc = (axis == 0)
                 ? Constraints{alloc, alloc, 0.0f, cross_max}
@@ -1371,7 +1398,10 @@ public:
             ci++;
         }
         if (has_subtitle_ && ci < static_cast<int>(children_.size())) {
-            Size s = children_[ci]->layout({0.0f, content_width, 0.0f, 30.0f});
+            // Any widget may be a subtitle (a segmented control, a field), not
+            // just a 12 px line: a 30 px cap squeezed a 40 px control into a
+            // slot it overflowed, drawing it over the title.
+            Size s = children_[ci]->layout({0.0f, content_width, 0.0f, 400.0f});
             subtitle_h = s.height_;
             ci++;
         }

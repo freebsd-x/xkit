@@ -1,3 +1,4 @@
+#include "xrender/font_manager.h"
 #include "xkit/application.h"
 #include "xkit/element.h"
 #include "xkit/animation.h"
@@ -180,6 +181,43 @@ std::shared_ptr<Element> XApplication::getFocusedElement() noexcept {
 
 XBusClient* XApplication::getBus() noexcept {
     return g_xbus.get();
+}
+
+// FBX_LAYOUT_AUDIT=1: report nodes that laid out absurdly large (more than 4x
+// the window) — the mark of a child that took a container's unbounded 100000 px
+// cross axis (a FlexRow with a flexible Spacer in a column without Stretch,
+// whose right-aligned buttons end up off-screen). Layout runs on hidden nodes
+// too, so one pass covers every panel built at startup. Only the outermost
+// offender of each subtree is reported, named by the first texts inside it.
+static void auditLayout(const RenderNode& root, float window_w, float window_h) {
+    auto texts = [](const RenderNode& n) {
+        std::string out;
+        std::vector<const RenderNode*> stack{&n};
+        int found = 0;
+        while (!stack.empty() && found < 3) {
+            const RenderNode* cur = stack.back();
+            stack.pop_back();
+            if (auto* t = dynamic_cast<const RenderText*>(cur); t && !t->text().empty()) {
+                out += (found++ ? " | " : "") + t->text().substr(0, 40);
+            }
+            const auto& kids = cur->children();
+            for (auto it = kids.rbegin(); it != kids.rend(); ++it) stack.push_back(it->get());
+        }
+        return out.empty() ? std::string("(no text)") : out;
+    };
+    int reported = 0;
+    std::function<void(const RenderNode&, bool)> walk = [&](const RenderNode& n, bool parent_bad) {
+        Size sz = n.getSize();
+        bool bad = sz.width_ > 4 * window_w || sz.height_ > 4 * window_h;
+        if (bad && !parent_bad) {
+            ++reported;
+            std::fprintf(stderr, "[layout-audit] %.0fx%.0f%s: %s\n", sz.width_, sz.height_,
+                         n.isVisible() ? "" : " (hidden)", texts(n).c_str());
+        }
+        for (const auto& c : n.children()) walk(*c, bad || parent_bad);
+    };
+    walk(root, false);
+    std::fprintf(stderr, "[layout-audit] %d oversized subtree(s)\n", reported);
 }
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
@@ -383,6 +421,17 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         cap_rights_init(&io_rights, CAP_WRITE);
         (void)cap_rights_limit(STDOUT_FILENO, &io_rights);
         (void)cap_rights_limit(STDERR_FILENO, &io_rights);
+
+        // Load the fonts text will ask for now: after cap_enter() a face can't
+        // be opened any more (FreeType keeps the files it already has open),
+        // so a face first needed later drew nothing — every label in a
+        // sandboxed app came out blank.
+        for (const char* family : {"", "monospace"})
+            for (auto weight : {fbx::xrender::FontWeight::Light, fbx::xrender::FontWeight::Regular,
+                                fbx::xrender::FontWeight::SemiBold, fbx::xrender::FontWeight::Bold})
+                for (auto style : {fbx::xrender::FontStyle::Normal, fbx::xrender::FontStyle::Italic})
+                    (void)fbx::xrender::FontManager::getFace(family, weight, style);
+        (void)fbx::xrender::FontManager::getEmojiFace();
 
         // Enter capability mode — global namespace (filesystem, new sockets) now inaccessible.
         if (cap_enter() == 0) {
@@ -647,6 +696,12 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         auto root_node = root_element->getRenderNode();
         root_element->syncState();
         (void)root_node->layout(c);
+
+        {
+            static const bool audit = [] { const char* e = std::getenv("FBX_LAYOUT_AUDIT"); return e && *e == '1'; }();
+            static int audit_frame = 0;
+            if (audit && ++audit_frame == 3) auditLayout(*root_node, static_cast<float>(window_w), static_cast<float>(window_h));
+        }
 
         // The desktop shell: tell the compositor where its open popups are, so
         // a click on one that sits over an app window reaches the shell. Popups

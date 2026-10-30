@@ -57,7 +57,7 @@ public:
 private:
     ThemeManager() noexcept = default;
 
-    std::atomic<bool> is_dark_mode_{false};
+    std::atomic<bool> is_dark_mode_{true};   // matches the compositor default (dark)
     int accent_idx_{0};
 
     Theme light_theme_ = {

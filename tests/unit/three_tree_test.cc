@@ -108,4 +108,27 @@ TEST_F(ThreeTreeTest, TextChangedAfterMountReachesRenderNode) {
     EXPECT_EQ(direct->text(), "Image Viewer has reached today's limit.");
 }
 
+// Values set from code after mounting (a switch restored from settings, a
+// progress update) reach the render nodes — they used to keep their first value.
+TEST_F(ThreeTreeTest, ValuesChangedAfterMountReachRenderNodes) {
+    auto sw = std::make_shared<SwitchWidget>(false, nullptr);
+    auto slider = std::make_shared<SliderWidget>(0.1f, 0.0f, 1.0f, nullptr);
+    auto bar = std::make_shared<ProgressBarWidget>(0.0f);
+    auto col = std::make_shared<FlexColumn>(std::vector<std::shared_ptr<Widget>>{sw, slider, bar});
+    auto element = col->createElement();
+    element->mount(nullptr);
+    element->syncState();
+
+    sw->setValue(true);
+    slider->setValue(0.8f);
+    bar->setValue(0.5f);
+    element->syncState();
+
+    const auto& nodes = element->getRenderNode()->children();
+    ASSERT_EQ(nodes.size(), 3u);
+    EXPECT_TRUE(std::dynamic_pointer_cast<RenderSwitch>(nodes[0])->value());
+    EXPECT_FLOAT_EQ(std::dynamic_pointer_cast<RenderSlider>(nodes[1])->value(), 0.8f);
+    EXPECT_FLOAT_EQ(std::dynamic_pointer_cast<RenderProgressBar>(nodes[2])->value(), 0.5f);
+}
+
 } // namespace fbx::xkit::testing

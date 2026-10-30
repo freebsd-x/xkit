@@ -203,7 +203,12 @@ bool VulkanEngine::init(int w, int h) {
         VkViewport vp{0,0,1920,1080,0,1}; VkRect2D sc{{0,0},{1920,1080}}; VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,0,0,1,&vp,1,&sc};
         VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,0,0,0,0,VK_POLYGON_MODE_FILL,VK_CULL_MODE_NONE,VK_FRONT_FACE_CLOCKWISE,0,0,0,0,1};
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,0,0,VK_SAMPLE_COUNT_1_BIT,0,0,0,0,0};
-        VkPipelineColorBlendAttachmentState ba{1,VK_BLEND_FACTOR_SRC_ALPHA,VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,VK_BLEND_OP_ADD,VK_BLEND_FACTOR_ONE,VK_BLEND_FACTOR_ZERO,VK_BLEND_OP_ADD,0xf};
+        // Alpha composites "over" too (ONE, ONE_MINUS_SRC_ALPHA). It used to
+        // be ONE, ZERO — every draw *replaced* the surface's alpha with its
+        // own, so a button shadow, an anti-aliased edge or a text quad left a
+        // see-through hole in an opaque window, and the compositor (which
+        // honours per-pixel alpha) showed the wallpaper through it.
+        VkPipelineColorBlendAttachmentState ba{1,VK_BLEND_FACTOR_SRC_ALPHA,VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,VK_BLEND_OP_ADD,VK_BLEND_FACTOR_ONE,VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,VK_BLEND_OP_ADD,0xf};
         VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,0,0,0,VK_LOGIC_OP_COPY,1,&ba,{0,0,0,0}};
         VkDynamicState ds[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR }; VkPipelineDynamicStateCreateInfo dsi{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,0,0,2,ds};
         VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,0,0,2,ss,&vis,&ias,0,&vps,&rs,&ms,0,&bs,&dsi,l,render_pass_,0,0,0};
