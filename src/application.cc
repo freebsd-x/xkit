@@ -485,6 +485,17 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                         continue;
                     }
                 }
+                // The compositor closed our window (title-bar close, Super+Q,
+                // Screen Time's "Close app"): the app ends. Before, the message
+                // was dropped and the process lived on with no window.
+                if (data.size() == sizeof(shared::RenderMessage)) {
+                    const auto* rm = reinterpret_cast<const shared::RenderMessage*>(data.data());
+                    if (rm->status_ == shared::RenderMessageStatus::SurfaceClosed &&
+                        rm->surface_id_ == my_surface_id && !is_shell) {
+                        LOG_INFO("Window closed — exiting.");
+                        return 0;
+                    }
+                }
                 if (!g_xbus->HandleIncoming(data)) {
                     // The unframed SOCK_STREAM transport can coalesce several
                     // InputMessages into one recvmsg — a single key produces a
@@ -636,6 +647,38 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         auto root_node = root_element->getRenderNode();
         root_element->syncState();
         (void)root_node->layout(c);
+
+        // The desktop shell: tell the compositor where its open popups are, so
+        // a click on one that sits over an app window reaches the shell. Popups
+        // are the visible layers of the shell's root stack (the overlay host's
+        // child 0) that paint a background and aren't full-screen (the
+        // desktop/taskbar layer is), plus xkit's own overlays (menus, dialogs).
+        if (is_shell && shell_surface_id == 999 && g_xbus) {
+            shared::ShellInputRegion region{};
+            const float screen_area = static_cast<float>(window_w) * static_cast<float>(window_h);
+            auto add = [&](const RenderNode& n, bool needs_background) {
+                if (region.count_ >= std::size(region.rects_)) return;
+                if (!n.isVisible() || (needs_background && !n.paintsBackground())) return;
+                Size sz = n.getSize();
+                if (sz.width_ <= 0 || sz.height_ <= 0 || sz.width_ * sz.height_ >= 0.9f * screen_area) return;
+                Offset o = n.getAbsoluteOffset();
+                region.rects_[region.count_++] = {
+                    static_cast<int16_t>(o.x_), static_cast<int16_t>(o.y_),
+                    static_cast<int16_t>(sz.width_), static_cast<int16_t>(sz.height_)};
+            };
+            const auto& host_children = root_node->children();
+            if (!host_children.empty())
+                for (const auto& layer : host_children[0]->children()) add(*layer, true);
+            for (size_t i = 1; i < host_children.size(); ++i) add(*host_children[i], false);
+            static shared::ShellInputRegion sent_region{};
+            static bool sent_once = false;
+            if (!sent_once || std::memcmp(&region, &sent_region, sizeof(region)) != 0) {
+                sent_region = region;
+                sent_once = true;
+                g_xbus->Call("com.freebsdx.Shell", static_cast<uint32_t>(shared::ShellOpcode::SetInputRegion),
+                             {reinterpret_cast<const uint8_t*>(&region), sizeof(region)}, nullptr);
+            }
+        }
 
         // Render and Export frame
         auto frame = renderer.paint(root_node);

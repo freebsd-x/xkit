@@ -93,6 +93,7 @@ public:
         children_.push_back(std::move(child));
     }
     void clearChildren() noexcept { children_.clear(); }
+    [[nodiscard]] const std::vector<std::shared_ptr<RenderNode>>& children() const noexcept { return children_; }
 
     constexpr void setOffset(Offset offset) noexcept { offset_ = offset; }
     [[nodiscard]] constexpr Offset getOffset() const noexcept { return offset_; }
@@ -156,6 +157,7 @@ public:
     [[nodiscard]] float minTouchSize() const noexcept { return min_touch_; }
     void setVisibility(bool v) noexcept { visible_ = v; }
     [[nodiscard]] bool isVisible() const noexcept { return visible_; }
+    [[nodiscard]] bool paintsBackground() const noexcept { return hasBackground_ && backgroundColor_.a > 0.0f; }
 
     // ── Flex container properties (used by RenderFlexColumn / RenderFlexRow) ──
     void setGap(float g) noexcept { gap_ = g; }
@@ -537,6 +539,7 @@ public:
 
     // ── Setters ────────────────────────────────────────────────────────────
     void setText(const std::string& text)  noexcept { text_    = text; }
+    [[nodiscard]] const std::string& text() const noexcept { return text_; }
     void setColor(Color c)                           { customColor_ = c; hasCustomColor_ = true; }
     void setFontWeight(fbx::xrender::FontWeight w)   noexcept { font_weight_ = w; }
     void setFontStyle(fbx::xrender::FontStyle   s)   noexcept { font_style_  = s; }

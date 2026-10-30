@@ -251,13 +251,19 @@ public:
     }
 
     [[nodiscard]] bool handleEvent(const shared::InputMessage& event) noexcept override {
-        // Spatial hit-test for mouse events: only forward to the child under the cursor.
+        // Spatial hit-test for mouse events: only forward to the child under the
+        // cursor. Topmost first (last painted), and never a hidden child: in a
+        // stack, a lower layer or a hidden popup at the same spot used to take
+        // the click meant for the visible one on top. (Rows/columns don't
+        // overlap, so the order changes nothing there.)
         if (event.type_ == shared::InputEventType::MouseMove ||
             event.type_ == shared::InputEventType::MouseButton) {
             float mx = static_cast<float>(event.value_a_);
             float my = static_cast<float>(event.value_b_);
-            for (auto& child : children_elements_) {
+            for (auto it = children_elements_.rbegin(); it != children_elements_.rend(); ++it) {
+                auto& child = *it;
                 auto node = child->getRenderNode();
+                if (!node->isVisible()) continue;
                 auto off  = node->getAbsoluteOffset();
                 auto sz   = node->getSize();
                 if (mx >= off.x_ && mx < off.x_ + sz.width_ &&
@@ -1286,6 +1292,17 @@ public:
         apply_widget_props(renderNode_, widget_);
     }
     void unmount() noexcept override { parent_.reset(); }
+
+    // A retained label changed with setText()/setColor() after mounting (a
+    // clock, a status line, a dialog message): carry it to the render node.
+    // Without this the node kept the text it was created with.
+    void syncState() noexcept override {
+        Element::syncState();
+        auto text_widget = std::static_pointer_cast<TextWidget>(widget_);
+        auto text_node = std::static_pointer_cast<RenderText>(renderNode_);
+        if (text_node->text() != text_widget->text()) text_node->setText(text_widget->text());
+        if (text_widget->hasColor()) text_node->setColor(text_widget->color());
+    }
 
     void onThemeChanged(const Theme& theme) noexcept override {
         auto text_widget = std::static_pointer_cast<TextWidget>(widget_);

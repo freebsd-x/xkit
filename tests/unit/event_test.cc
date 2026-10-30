@@ -51,4 +51,34 @@ TEST_F(EventTest, ButtonConsumesClickAndTriggersCallback) {
     EXPECT_EQ(fire_count, 1);
 }
 
+// In a stack the click goes to the topmost visible layer: not to a layer
+// underneath (the shell's full-screen desktop under a popup), and never to a
+// hidden layer at the same spot (a closed dialog under the open one).
+TEST_F(EventTest, StackClickGoesToTopmostVisibleLayer) {
+    int bottom = 0, hidden = 0, top = 0;
+    auto layer = [](int& count) {
+        auto b = std::make_shared<ButtonWidget>(std::make_shared<TextWidget>("x", 12.0f),
+                                                [&count]() { ++count; });
+        b->setFixedSize(100, 100);
+        return b;
+    };
+    auto bottom_w = layer(bottom), hidden_w = layer(hidden), top_w = layer(top);
+    auto stack = std::make_shared<StackWidget>(std::vector<std::shared_ptr<Widget>>{bottom_w, top_w, hidden_w});
+    hidden_w->setVisibility(false);
+    auto element = stack->createElement();
+    element->mount(nullptr);
+    element->syncState();
+    (void)element->getRenderNode()->layout(Constraints{0, 100, 0, 100});
+
+    shared::InputMessage press{
+        .type_ = shared::InputEventType::MouseButton,
+        .value_a_ = 50, .value_b_ = 50,
+        .char_value_ = 1
+    };
+    EXPECT_TRUE(element->handleEvent(press));
+    EXPECT_EQ(top, 1);
+    EXPECT_EQ(bottom, 0);
+    EXPECT_EQ(hidden, 0);
+}
+
 } // namespace fbx::xkit::testing

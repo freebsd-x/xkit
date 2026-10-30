@@ -78,4 +78,34 @@ TEST_F(ThreeTreeTest, ElementUpdateIsO1) {
     EXPECT_EQ(element->getRenderNode(), original_render_node);
 }
 
+// A label changed after mounting (a clock, a dialog's message) reaches its
+// render node on the next sync — through a container's unchanged-children
+// fast path too. It used to keep the text it was created with.
+TEST_F(ThreeTreeTest, TextChangedAfterMountReachesRenderNode) {
+    auto label = std::make_shared<TextWidget>("", 12.0f);
+    auto col = std::make_shared<FlexColumn>(std::vector<std::shared_ptr<Widget>>{label});
+    auto element = col->createElement();
+    element->mount(nullptr);
+    element->syncState();
+
+    auto label_element = label->createElement();   // standalone, for the direct case
+    label_element->mount(nullptr);
+
+    label->setText("Image Viewer has reached today's limit.");
+    element->syncState();
+    label_element->syncState();
+
+    bool found = false;
+    for (const auto& n : element->getRenderNode()->children()) {
+        if (auto t = std::dynamic_pointer_cast<RenderText>(n)) {
+            EXPECT_EQ(t->text(), "Image Viewer has reached today's limit.");
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+    auto direct = std::dynamic_pointer_cast<RenderText>(label_element->getRenderNode());
+    ASSERT_NE(direct, nullptr);
+    EXPECT_EQ(direct->text(), "Image Viewer has reached today's limit.");
+}
+
 } // namespace fbx::xkit::testing
