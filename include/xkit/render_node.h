@@ -180,6 +180,18 @@ public:
     void setPadding(float p) noexcept { padding_ = p; }
     void setBackgroundColor(Color c) noexcept { backgroundColor_ = c; hasBackground_ = true; }
     void setFixedSize(float w, float h) noexcept { fixedWidth_ = w; fixedHeight_ = h; hasFixedSize_ = true; }
+    // The size to use given a node's `natural` (content) size: the fixed size,
+    // except that a 0 axis next to a set one means "auto" — it takes the
+    // natural size (setFixedSize(0, 26) = content width, 26 tall). (0, 0)
+    // stays a deliberate collapse. Nodes that size themselves in performLayout
+    // must use this rather than the raw fixed size, or "auto" comes out 0 px
+    // (buttons with setFixedSize(0, h) laid out 0 wide — invisible).
+    [[nodiscard]] Size fixedOr(Size natural) const noexcept {
+        if (!hasFixedSize_) return natural;
+        if (fixedWidth_ <= 0.0f && fixedHeight_ <= 0.0f) return {0.0f, 0.0f};
+        return {fixedWidth_  > 0.0f ? fixedWidth_  : natural.width_,
+                fixedHeight_ > 0.0f ? fixedHeight_ : natural.height_};
+    }
     void setBorderRadius(float r) noexcept { borderRadius_ = r; }
     void setAlignment(Alignment a) noexcept { alignment_ = a; }
     void setStackAnchor(StackAnchor a) noexcept { stack_anchor_ = a; }
@@ -500,10 +512,8 @@ public:
             // 100px default width is dropped so icon/clock buttons stay compact.
             // min_touch_ floors BOTH dimensions so a small icon button still
             // presents a comfortable tap target (child stays centred below).
-            Size s = hasFixedSize_
-                ? Size{fixedWidth_, fixedHeight_}
-                : Size{std::max(childSize.width_  + padding_ * 2.0f, min_touch_),
-                       std::max(std::max(childSize.height_ + padding_ * 2.0f, desiredHeight_), min_touch_)};
+            Size s = fixedOr({std::max(childSize.width_  + padding_ * 2.0f, min_touch_),
+                              std::max(std::max(childSize.height_ + padding_ * 2.0f, desiredHeight_), min_touch_)});
             s = constraints.clamp(s);
             if (!children_.empty()) {
                 float ox = std::max(padding_, (s.width_  - childSize.width_)  * 0.5f);
@@ -512,14 +522,22 @@ public:
             }
             return s;
         }
-        // Lay out children for their side effects; each child's size is read
-        // back later via getSize(), so the returned Size is intentionally dropped.
-        for (auto& child : children_) (void)child->layout(constraints);
+        // Lay out the children; an axis without a desired size wraps them. The
+        // wrapper boxes (Container, GestureDetector, DragSource: RenderBox(0, 0))
+        // used to stay 0x0 around their content — it still painted, but the box
+        // had no area to click (Mail's folder rows) and painted no background
+        // (Weather's card).
+        float child_w = 0.0f, child_h = 0.0f;
+        for (auto& child : children_) {
+            Size cs = child->layout(constraints);
+            child_w = std::max(child_w, cs.width_);
+            child_h = std::max(child_h, cs.height_);
+        }
         // An explicit setFixedSize() (via apply_widget_props) overrides the
         // constructor's default box size — lets e.g. a wide button opt out of the
         // fixed 100x40 default instead of overflowing its content.
-        Size s = hasFixedSize_ ? Size{fixedWidth_, fixedHeight_}
-                               : Size{desiredWidth_, desiredHeight_};
+        Size s = fixedOr({desiredWidth_  > 0.0f ? desiredWidth_  : child_w,
+                          desiredHeight_ > 0.0f ? desiredHeight_ : child_h});
         return constraints.clamp(s);
     }
     void paintSelf(fbx::xrender::DisplayList& displayList, Offset globalOffset) noexcept override {
@@ -650,10 +668,11 @@ public:
         // wrap/flow children get a real bound to work within) and clamp our own
         // box to it. Without this the scroll view balloons to its content's
         // natural width, and the declared size is silently ignored.
-        float child_max_w = hasFixedSize_ ? fixedWidth_ : constraints.max_width_;
-        Size childSize = children_[0]->layout({hasFixedSize_ ? fixedWidth_ : constraints.min_width_,
+        const bool fixed_w = hasFixedSize_ && fixedWidth_ > 0.0f;
+        float child_max_w = fixed_w ? fixedWidth_ : constraints.max_width_;
+        Size childSize = children_[0]->layout({fixed_w ? fixedWidth_ : constraints.min_width_,
                                                child_max_w, 0.0f, 100000.0f});
-        Size ourSize = hasFixedSize_ ? Size{fixedWidth_, fixedHeight_} : constraints.clamp(childSize);
+        Size ourSize = fixedOr(constraints.clamp(childSize));
         // Clamp scroll so we never show empty space below content.
         float max_scroll = std::max(0.0f, childSize.height_ - ourSize.height_);
         scroll_y_ = std::min(scroll_y_, max_scroll);

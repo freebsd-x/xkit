@@ -152,14 +152,31 @@ static void focusElement(const std::shared_ptr<Element>& el);
 void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = std::move(cb); }
 
 static std::atomic<std::thread::id> g_ui_thread{};
+static std::atomic<int> g_window_w{0}, g_window_h{0};
+
+void XApplication::windowSize(int& w, int& h) noexcept {
+    w = g_window_w.load();
+    h = g_window_h.load();
+}
 
 bool XApplication::onUiThread() noexcept {
     return g_ui_thread.load() == std::this_thread::get_id();
 }
 
+// Self-pipe that wakes the frame loop's poll() when work is posted — it idles
+// up to 100 ms otherwise, and a worker's result (say, each fetched map tile)
+// waited that long, twice per round trip.
+static int g_wake_pipe[2] = {-1, -1};
+
 void XApplication::post(std::function<void()> fn) noexcept {
-    std::lock_guard<std::mutex> lk(g_post_mu);
-    g_posted.push_back(std::move(fn));
+    {
+        std::lock_guard<std::mutex> lk(g_post_mu);
+        g_posted.push_back(std::move(fn));
+    }
+    if (g_wake_pipe[1] >= 0) {
+        const char b = 1;
+        (void)::write(g_wake_pipe[1], &b, 1);   // non-blocking: a full pipe already wakes it
+    }
 }
 
 void XApplication::moveFocus(bool forward) noexcept {
@@ -291,6 +308,7 @@ XBusClient* XApplication::getBus() noexcept {
 // whose right-aligned buttons end up off-screen). Layout runs on hidden nodes
 // too, so one pass covers every panel built at startup. Only the outermost
 // offender of each subtree is reported, named by the first texts inside it.
+// It also reports visible content squeezed into a zero-size box (see below).
 // ── Keyboard focus traversal ─────────────────────────────────────────────────
 // Tab / Shift+Tab move focus through the window's controls in layout order and
 // Enter / Space activate the focused one — for keyboard and screen-reader
@@ -407,6 +425,40 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
     walk(root, false);
     std::fprintf(stderr, "[layout-audit] %d oversized subtree(s)\n", reported);
 
+    // The opposite failure: content laid out into a zero-width or zero-height
+    // box, so it never shows (Maps' map area came out 0 px wide). Only visible
+    // nodes count, and only real content — non-empty text or an image — so
+    // empty labels and spacers aren't reported. Outermost offender only.
+    auto content = [](const RenderNode& n) -> std::string {
+        std::vector<const RenderNode*> stack{&n};
+        while (!stack.empty()) {
+            const RenderNode* cur = stack.back();
+            stack.pop_back();
+            if (!cur->isVisible()) continue;
+            if (auto* t = dynamic_cast<const RenderText*>(cur); t && !t->text().empty())
+                return "\"" + t->text().substr(0, 40) + "\"";
+            if (auto* im = dynamic_cast<const RenderImage*>(cur); im && !im->getPixels().empty())
+                return "image " + std::to_string(im->getPixelWidth()) + "x" + std::to_string(im->getPixelHeight());
+            for (const auto& c : cur->children()) stack.push_back(c.get());
+        }
+        return {};
+    };
+    int collapsed = 0;
+    std::function<void(const RenderNode&)> walk0 = [&](const RenderNode& n) {
+        if (!n.isVisible()) return;
+        Size sz = n.getSize();
+        if (sz.width_ < 0.5f || sz.height_ < 0.5f) {
+            if (std::string what = content(n); !what.empty()) {
+                ++collapsed;
+                std::fprintf(stderr, "[layout-audit] collapsed %.0fx%.0f: %s\n", sz.width_, sz.height_, what.c_str());
+            }
+            return;   // its subtree is part of the same problem
+        }
+        for (const auto& c : n.children()) walk0(*c);
+    };
+    walk0(root);
+    std::fprintf(stderr, "[layout-audit] %d collapsed subtree(s)\n", collapsed);
+
     // FBX_LAYOUT_AUDIT=2: also dump the tree's first levels — position, size,
     // flags and first text — to see how a window is actually laid out.
     const char* level = std::getenv("FBX_LAYOUT_AUDIT");
@@ -428,6 +480,7 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
     g_ui_thread = std::this_thread::get_id();
+    if (g_wake_pipe[0] < 0) (void)::pipe2(g_wake_pipe, O_NONBLOCK | O_CLOEXEC);
     (void)allow_background;
     fbx::shared::Logger::init(is_shell ? "xshell" : "xapp");
     // Backtrace on fatal faults, before anything can crash. Installed pre-sandbox;
@@ -502,6 +555,8 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                 if (res->status_ == shared::RenderMessageStatus::SurfaceReady) {
                     window_w = static_cast<int>(res->width_);
                     window_h = static_cast<int>(res->height_);
+                    g_window_w = window_w;
+                    g_window_h = window_h;
                     LOG_INFO("SurfaceReady Handshake Complete! Screen: {}x{}", window_w, window_h);
                     ready = true;
                     break;
@@ -711,8 +766,15 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         // visual change.
         {
             int timeout_ms = ticker.hasActiveAnimations() ? kActiveFrameMs : kIdleFrameMs;
-            struct pollfd pfd{ shared_socket->fd(), POLLIN, 0 };
-            (void)::poll(&pfd, 1, timeout_ms);
+            bool posted_pending;
+            { std::lock_guard<std::mutex> lk(g_post_mu); posted_pending = !g_posted.empty(); }
+            if (posted_pending) timeout_ms = 0;
+            struct pollfd pfd[2] = {{shared_socket->fd(), POLLIN, 0}, {g_wake_pipe[0], POLLIN, 0}};
+            (void)::poll(pfd, g_wake_pipe[0] >= 0 ? 2 : 1, timeout_ms);
+            if (g_wake_pipe[0] >= 0 && (pfd[1].revents & POLLIN)) {
+                char buf[64];
+                while (::read(g_wake_pipe[0], buf, sizeof(buf)) > 0) {}
+            }
         }
 
         auto frame_start = std::chrono::steady_clock::now();

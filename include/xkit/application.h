@@ -84,6 +84,10 @@ public:
     // Is the caller on the UI thread (the one running XApplication::Run)?
     static bool onUiThread() noexcept;
 
+    // The window's size in pixels, as the compositor granted it (known from the
+    // on_init callback on; 0x0 before). Windows don't resize after that.
+    static void windowSize(int& w, int& h) noexcept;
+
     // Keyboard focus: move it to the next / previous control (as Tab /
     // Shift+Tab do), or to a given widget (a text field also starts editing).
     // focusWidget returns false if the widget isn't on screen.
