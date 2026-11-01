@@ -263,6 +263,22 @@ bool VulkanEngine::init(int w, int h) {
     return true;
 }
 
+// The face a text command asks for (family, weight, style). The weight snaps
+// to the ones loaded before an app's Capsicum sandbox (300/400/600/700, see
+// XApplication::Run); a face that can't be opened falls back to the default.
+// Used both to warm the glyph atlas and to draw, so the lookups match.
+static xrender::FontFace* faceFor(const fbx::shared::TextData* td) noexcept {
+    std::string family(td->font_family_, strnlen(td->font_family_, sizeof(td->font_family_)));
+    uint16_t w = td->font_weight_ ? td->font_weight_ : 400;
+    auto weight = w < 350 ? xrender::FontWeight::Light
+                : w < 500 ? xrender::FontWeight::Regular
+                : w < 650 ? xrender::FontWeight::SemiBold
+                          : xrender::FontWeight::Bold;
+    auto style = td->font_style_ ? xrender::FontStyle::Italic : xrender::FontStyle::Normal;
+    if (auto* f = xrender::FontManager::getFace(family, weight, style)) return f;
+    return xrender::FontManager::getFace();
+}
+
 RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     uint32_t w = window_w_, h = window_h_;
     // Draw into the buffer the compositor is NOT currently sampling.
@@ -277,14 +293,13 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     // invisibly. The atlas stabilises after the first few frames (static UI
     // text), so re-uploads stop once every glyph has been seen once.
     if (font_atlas_ && text_shaper_) {
-        auto* face = xrender::FontManager::getFace();
         for (const auto& cmd : dl.getCommands()) {
             if (cmd.type_ != fbx::shared::CommandType::DrawText) continue;
             const auto* td = reinterpret_cast<const fbx::shared::TextData*>(
                 dl.getDataBuffer().data() + cmd.data_offset_);
             const char* str = reinterpret_cast<const char*>(td + 1);
             xrender::FontManager::ensureGlyphs(std::string(str, td->string_length_),
-                                               face, *font_atlas_);
+                                               faceFor(td), *font_atlas_);
         }
         if (font_atlas_->isDirty()) {
             reuploadFontAtlas();
@@ -369,7 +384,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                 const char* str = reinterpret_cast<const char*>(td + 1);
                 std::string text(str, td->string_length_);
 
-                auto* face  = xrender::FontManager::getFace();
+                auto* face  = faceFor(td);   // the family / weight / style asked for
                 auto* emoji = xrender::FontManager::getEmojiFace();
                 auto glyphs = (face && text_shaper_)
                     ? text_shaper_->shapeText(text, face->hb_font_, face->face_id_,

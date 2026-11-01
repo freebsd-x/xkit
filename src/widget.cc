@@ -1310,7 +1310,13 @@ public:
     // (every label drew in the default regular face).
     static void applyFont(RenderText& node, const TextWidget& w) noexcept {
         node.setFontFamily(w.fontFamily());
-        node.setFontWeight(static_cast<fbx::xrender::FontWeight>(w.fontWeight() ? w.fontWeight() : 400));   // 0 = default
+        // Snap to the weights loaded before the sandbox (and that the engine
+        // draws with), so text is measured with the face it's drawn in.
+        const uint16_t wt = w.fontWeight() ? w.fontWeight() : 400;   // 0 = default
+        node.setFontWeight(wt < 350 ? fbx::xrender::FontWeight::Light
+                         : wt < 500 ? fbx::xrender::FontWeight::Regular
+                         : wt < 650 ? fbx::xrender::FontWeight::SemiBold
+                                    : fbx::xrender::FontWeight::Bold);
         node.setFontStyle(w.fontStyle() ? fbx::xrender::FontStyle::Italic : fbx::xrender::FontStyle::Normal);
     }
 
