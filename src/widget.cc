@@ -1819,9 +1819,21 @@ public:
                               ? "Text field"
                               : renderNode_->accessibilityLabel();
         bool is_focused = (XApplication::getFocusedElement().get() == this);
+        // A password field never exposes what's typed: the semantic tree is
+        // spoken by the screen reader and sent to the compositor. Say how many
+        // characters there are, as screen readers do for secure fields.
+        auto tw = std::static_pointer_cast<TextInputWidget>(widget_);
+        const bool secure = tw && tw->passwordMode();
+        std::string value = edit_.text;
+        if (secure) {
+            size_t chars = 0;
+            for (unsigned char c : edit_.text) if ((c & 0xC0) != 0x80) ++chars;   // UTF-8 code points
+            value = chars ? std::to_string(chars) + (chars == 1 ? " character" : " characters") : "";
+            lbl += ", secure";
+        }
         return SemanticNode{
             .id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this) & 0xFFFFFFFF),
-            .role = "TextInput", .label = lbl, .value = edit_.text,
+            .role = "TextInput", .label = lbl, .value = value,
             .focused = is_focused,
             .x = abs.x_, .y = abs.y_, .width = sz.width_, .height = sz.height_
         };

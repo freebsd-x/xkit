@@ -79,6 +79,7 @@ public:
         for (const auto& child : children_) {
             child->paint(displayList, globalOffset);
         }
+        if (focus_ring_) paintFocusRing(displayList, globalOffset);
 
         if (opacity_ < 1.0f) {
             displayList.scaleAlphaFrom(opacity_start, opacity_);
@@ -133,12 +134,29 @@ public:
         return p ? p->getAbsoluteOffset() : Offset{0, 0};
     }
 
+    [[nodiscard]] std::shared_ptr<RenderNode> parent() const noexcept { return parent_.lock(); }
     void setOwnerElement(std::weak_ptr<Element> element) noexcept { ownerElement_ = element; }
     [[nodiscard]] std::shared_ptr<Element> getOwnerElement() const noexcept { return ownerElement_.lock(); }
 
     // ── Cursor shape ────────────────────────────────────────────────────────────
     // A node may declare the cursor shown while the pointer hovers it (or any
     // descendant that doesn't override it). Unset nodes inherit from their parent.
+    // Keyboard focus ring (set for the element Tab moved to; cleared by a click).
+    void setFocusRing(bool on) noexcept { focus_ring_ = on; }
+    void paintFocusRing(fbx::xrender::DisplayList& dl, Offset go) const noexcept {
+        auto a = fbx::xkit::ThemeManager::getInstance().getCurrentTheme().accent;
+        constexpr float t = 2.0f, gap = 2.0f;   // a 2 px ring, 2 px outside the control
+        const float x = go.x_ - gap - t, y = go.y_ - gap - t;
+        const float w = size_.width_ + 2 * (gap + t), h = size_.height_ + 2 * (gap + t);
+        const float edges[4][4] = {{x, y, w, t}, {x, y + h - t, w, t}, {x, y, t, h}, {x + w - t, y, t, h}};
+        for (const auto& e : edges) {
+            fbx::shared::RectData r{
+                .x_ = e[0], .y_ = e[1], .width_ = e[2], .height_ = e[3],
+                .r_ = a.r, .g_ = a.g, .b_ = a.b, .a_ = 1.0f,
+                .border_radius_ = 0.0f, .shadow_blur_ = 0.0f, .shadow_alpha_ = 0.0f};
+            dl.addCommand(fbx::shared::CommandType::DrawRect, {reinterpret_cast<const uint8_t*>(&r), sizeof(r)});
+        }
+    }
     void setCursor(CursorShape c) noexcept { cursor_ = c; }
     [[nodiscard]] CursorShape cursor() const noexcept { return cursor_; }
 
@@ -219,6 +237,7 @@ protected:
     std::weak_ptr<Element> ownerElement_;
 
     CursorShape cursor_{CursorShape::Inherit};
+    bool focus_ring_ = false;
     float opacity_{1.0f};
 
     float padding_{0};

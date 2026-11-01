@@ -16,6 +16,7 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <fcntl.h>
 #include <unistd.h>
@@ -87,12 +88,52 @@ std::shared_ptr<Element> XApplication::getPointerCapture() noexcept {
     return g_pointer_capture;
 }
 
+// Does `text` contain a letter or digit — not only symbols like "▾", "✕" or
+// emoji? Looks at UTF-8 lead bytes: ASCII alphanumerics, Latin/Greek/Cyrillic…
+// (C2–DF) and CJK/Hangul (E3–EF) count; the punctuation, arrow and symbol
+// block (E2) and emoji (F0+) don't.
+static bool saysSomething(const std::string& text) {
+    for (unsigned char c : text)
+        if (std::isalnum(c) || (c >= 0xC2 && c <= 0xDF) || (c >= 0xE3 && c <= 0xEF)) return true;
+    return false;
+}
+
+// The first visible text in `n`'s subtree that says something, skipping the
+// subtree `skip`.
+static std::string firstMeaningfulText(const RenderNode& n, const RenderNode* skip) {
+    if (&n == skip || !n.isVisible()) return {};
+    if (auto* t = dynamic_cast<const RenderText*>(&n))
+        return saysSomething(t->text()) ? t->text() : std::string{};
+    for (const auto& c : n.children())
+        if (auto s = firstMeaningfulText(*c, skip); !s.empty()) return s;
+    return {};
+}
+
+// A name for a control that has none of its own, the way screen readers find
+// one: its own text ("APPEARANCE"), else the nearest text around it — a list
+// row's title for the switch at its end ("Dark Mode").
+static std::string nearestLabel(const RenderNode& node) {
+    if (auto own = firstMeaningfulText(node, nullptr); !own.empty()) return own;
+    auto p = node.parent();
+    for (int up = 0; p && up < 3; ++up, p = p->parent())
+        if (auto t = firstMeaningfulText(*p, &node); !t.empty()) return t;
+    return {};
+}
+
 void XApplication::requestFocus(std::shared_ptr<Element> element) noexcept {
     g_focused_element = element;
     // Auto-announce the focused element for screen readers, phrased the way a
     // screen reader speaks ("Save, button" / "Wi-Fi, switch, on").
     if (element) {
         auto tree = element->getSemanticTree();
+        // No name of its own (or only a generic one — "Switch", "Text field"):
+        // use the text around it.
+        auto lower = [](std::string v) { for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return v; };
+        const std::string l = lower(tree.label);
+        if (!saysSomething(l) || l == lower(tree.role) || l == "text field" || l == "container") {
+            if (auto node = element->getRenderNode())
+                if (auto near = nearestLabel(*node); !near.empty()) tree.label = near;
+        }
         a11y::NodeDesc desc{.role = tree.role, .label = tree.label, .value = tree.value};
         // For toggle roles the value string carries the state; map it to the
         // tri-state so describe() says "checked"/"on"/"selected" rather than
@@ -189,6 +230,83 @@ XBusClient* XApplication::getBus() noexcept {
 // whose right-aligned buttons end up off-screen). Layout runs on hidden nodes
 // too, so one pass covers every panel built at startup. Only the outermost
 // offender of each subtree is reported, named by the first texts inside it.
+// ── Keyboard focus traversal ─────────────────────────────────────────────────
+// Tab / Shift+Tab move focus through the window's controls in layout order and
+// Enter / Space activate the focused one — for keyboard and screen-reader
+// users (focus could only be moved with the mouse). A control is a visible
+// node showing a pointer (buttons, switches, sliders…) or text (fields) cursor.
+static std::weak_ptr<RenderNode> g_ring_node;
+
+static void collectFocusable(const RenderNode& n, std::vector<std::shared_ptr<Element>>& out) {
+    if (!n.isVisible()) return;
+    const Size sz = n.getSize();
+    if ((n.cursor() == CursorShape::Pointer || n.cursor() == CursorShape::Text) &&
+        sz.width_ > 0 && sz.height_ > 0) {
+        if (auto el = n.getOwnerElement()) { out.push_back(el); return; }   // its label isn't a separate stop
+    }
+    for (const auto& c : n.children()) collectFocusable(*c, out);
+}
+
+static void setFocusRing(const std::shared_ptr<Element>& el) {
+    if (auto old = g_ring_node.lock()) old->setFocusRing(false);
+    g_ring_node.reset();
+    if (!el) return;
+    if (auto node = el->getRenderNode()) { node->setFocusRing(true); g_ring_node = node; }
+}
+
+// A click at the centre of `el` (press + release, left button).
+static void clickElement(const std::shared_ptr<Element>& el) {
+    auto node = el->getRenderNode();
+    if (!node) return;
+    const Offset o = node->getAbsoluteOffset();
+    const Size sz = node->getSize();
+    shared::InputMessage m{};
+    m.type_      = shared::InputEventType::MouseButton;
+    m.value_a_   = static_cast<int32_t>(o.x_ + sz.width_ / 2);
+    m.value_b_   = static_cast<int32_t>(o.y_ + sz.height_ / 2);
+    m.modifiers_ = 272u << 16;   // BTN_LEFT, as the input loop packs it
+    m.char_value_ = 1;
+    (void)el->handleEvent(m);
+    m.char_value_ = 0;
+    (void)el->handleEvent(m);
+}
+
+// Handle Tab / Shift+Tab / Enter / Space. True if consumed.
+static bool handleFocusKeys(const shared::InputMessage& in, const RenderNode& root) {
+    if (in.type_ != shared::InputEventType::KeyPress || in.value_b_ == 0) return false;
+    constexpr int kTab = 15, kEnter = 28, kSpace = 57, kKpEnter = 96;
+    const bool shift = (in.modifiers_ & 1u) != 0;
+    if (in.value_a_ == kTab && !(in.modifiers_ & (2u | 4u | 8u))) {   // not Ctrl/Alt/Super+Tab
+        std::vector<std::shared_ptr<Element>> stops;
+        collectFocusable(root, stops);
+        if (stops.empty()) return true;
+        auto cur = XApplication::getFocusedElement();
+        auto it = std::find(stops.begin(), stops.end(), cur);
+        size_t i;
+        if (it == stops.end()) i = shift ? stops.size() - 1 : 0;
+        else {
+            size_t at = static_cast<size_t>(it - stops.begin());
+            i = shift ? (at + stops.size() - 1) % stops.size() : (at + 1) % stops.size();
+        }
+        auto next = stops[i];
+        auto node = next->getRenderNode();
+        if (node && node->cursor() == CursorShape::Text) clickElement(next);   // a field starts editing
+        XApplication::requestFocus(next);   // also announces it for the screen reader
+        setFocusRing(next);
+        return true;
+    }
+    if (in.value_a_ == kEnter || in.value_a_ == kKpEnter || in.value_a_ == kSpace) {
+        auto cur = XApplication::getFocusedElement();
+        auto node = cur ? cur->getRenderNode() : nullptr;
+        // Text fields take Enter/Space themselves; activate buttons, switches…
+        if (node && node->cursor() == CursorShape::Pointer && g_ring_node.lock() == node) {
+            clickElement(cur);
+            return true;
+        }
+    }
+    return false;
+}
+
 static void auditLayout(const RenderNode& root, float window_w, float window_h) {
     auto texts = [](const RenderNode& n) {
         std::string out;
@@ -595,6 +713,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                             input_msg.value_b_ = static_cast<int32_t>(cursor_y);
                             g_cursor_x = cursor_x; g_cursor_y = cursor_y;
                         } else if (input_msg.type_ == shared::InputEventType::MouseButton) {
+                            if (input_msg.value_b_ != 0) setFocusRing(nullptr);   // the ring is for keyboard focus
                             // Preserve the raw button state (1=down, 0=up) in
                             // char_value_ before overwriting value_a_/value_b_ with
                             // the cursor position for elements' bounds checks.
@@ -672,6 +791,8 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                                 input_msg.type_ == shared::InputEventType::KeyPress &&
                                 input_msg.value_b_ != 0 && g_shortcut_cb(input_msg)) {
                                 // consumed by a global accelerator
+                            } else if (handleFocusKeys(input_msg, *root_element->getRenderNode())) {
+                                // Tab moved focus / Enter or Space activated the focused control
                             } else {
                                 // Keyboard and other events go to the focused element.
                                 auto focused = getFocusedElement();
