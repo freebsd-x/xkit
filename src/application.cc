@@ -25,6 +25,17 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#    define FBX_SANITIZED 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define FBX_SANITIZED 1
+#endif
+#ifdef FBX_SANITIZED
+#include <sanitizer/common_interface_defs.h>
+#endif
 #ifdef __FreeBSD__
 #include <sys/capsicum.h>
 #endif
@@ -38,6 +49,15 @@ static std::mutex                         g_post_mu;  // XApplication::post queu
 static std::vector<std::function<void()>> g_posted;
 static std::shared_ptr<XBusClient> g_xbus = nullptr;
 static uint32_t g_surface_id = 0;
+
+static void sanitizerPrepareForSandbox() {
+#ifdef FBX_SANITIZED
+    __sanitizer_sandbox_arguments args{};
+    args.coverage_sandboxed = 0;
+    args.coverage_fd = -1;
+    __sanitizer_sandbox_on_notify(&args);
+#endif
+}
 
 // ── DnD state ─────────────────────────────────────────────────────────────────
 static std::string g_drop_mime;
@@ -612,6 +632,11 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                     (void)fbx::xrender::FontManager::getFace(family, weight, style);
         (void)fbx::xrender::FontManager::getEmojiFace();
         (void)fbx::xrender::FontManager::getLastResortFace();
+
+        // Sanitizer builds: let the runtime cache the module map (and start its
+        // symbolizer) now; inside capability mode it can't read either, and a
+        // report came out as a CHECK failure instead of a stack.
+        sanitizerPrepareForSandbox();
 
         // Enter capability mode — global namespace (filesystem, new sockets) now inaccessible.
         if (cap_enter() == 0) {
