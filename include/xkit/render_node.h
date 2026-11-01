@@ -308,16 +308,21 @@ protected:
                 // spacer grew to 100000 px and everything right of the spacer —
                 // toggles, values, buttons — was laid out off-screen.)
                 float cross_max = std::max(0.0f, avail_cross - mcs(c) - mce(c));
+                // Stretch fills the cross axis (a tight constraint); it used to
+                // only cap it, so a "stretched" sidebar stayed 0 px tall. Only
+                // when the cross axis is bounded.
+                float cross_min = (cross_align == CrossAxisAlignment::Stretch && avail_cross < 50000.0f)
+                                ? cross_max : 0.0f;
                 Constraints cc;
                 if (c->flex_basis_ >= 0.0f) {
                     float b = c->flex_basis_;
                     cc = (axis == 0)
-                       ? Constraints{b, b, 0.0f, cross_max}
-                       : Constraints{0.0f, cross_max, b, b};
+                       ? Constraints{b, b, cross_min, cross_max}
+                       : Constraints{cross_min, cross_max, b, b};
                 } else {
                     cc = (axis == 0)
-                       ? Constraints{0.0f, 100000.0f, 0.0f, cross_max}
-                       : Constraints{0.0f, cross_max, 0.0f, 100000.0f};
+                       ? Constraints{0.0f, 100000.0f, cross_min, cross_max}
+                       : Constraints{cross_min, cross_max, 0.0f, 100000.0f};
                 }
                 sizes[i] = c->layout(cc);
                 if (main_bounded && c->flex_basis_ < 0.0f && mainOf(sizes[i]) >= 50000.0f) {
@@ -346,10 +351,12 @@ protected:
             alloc = std::max(0.0f, alloc);
 
             float cross_max = std::max(0.0f, avail_cross - mcs(c) - mce(c));   // see pass 1
+            float cross_min = (cross_align == CrossAxisAlignment::Stretch && avail_cross < 50000.0f)
+                            ? cross_max : 0.0f;
 
             Constraints cc = (axis == 0)
-                ? Constraints{alloc, alloc, 0.0f, cross_max}
-                : Constraints{0.0f, cross_max, alloc, alloc};
+                ? Constraints{alloc, alloc, cross_min, cross_max}
+                : Constraints{cross_min, cross_max, alloc, alloc};
             sizes[i] = c->layout(cc);
         }
 
@@ -1362,14 +1369,24 @@ private:
 class RenderDivider : public RenderNode {
 public:
     explicit RenderDivider(float thickness) noexcept : thickness_(thickness) {}
+    // Horizontal in a column. A divider placed in a row is measured with an
+    // unbounded width — it separates columns, so it's a vertical line there
+    // (as tall as the row lets it be) instead of a horizontal one that ate
+    // half the row.
     [[nodiscard]] Size performLayout(const Constraints& constraints) noexcept override {
+        vertical_ = constraints.max_width_ >= 50000.0f;
+        if (vertical_) {
+            float h = constraints.max_height_ < 50000.0f ? constraints.max_height_ : constraints.min_height_;
+            return constraints.clamp({thickness_, h});
+        }
         return constraints.clamp({constraints.max_width_, thickness_});
     }
     void paintSelf(fbx::xrender::DisplayList& dl, Offset go) noexcept override {
         auto c = fbx::xkit::ThemeManager::getInstance().getCurrentTheme().text;
         fbx::shared::RectData rect = {
             .x_ = go.x_, .y_ = go.y_,
-            .width_ = size_.width_, .height_ = thickness_,
+            .width_ = vertical_ ? thickness_ : size_.width_,
+            .height_ = vertical_ ? size_.height_ : thickness_,
             .r_ = c.r, .g_ = c.g, .b_ = c.b, .a_ = 0.12f, // subtle tint of text color
             .border_radius_ = 0.0f, .shadow_blur_ = 0.0f, .shadow_alpha_ = 0.0f
         };
@@ -1377,6 +1394,7 @@ public:
     }
 private:
     float thickness_;
+    bool  vertical_ = false;
 };
 
 class RenderListTile : public RenderNode {

@@ -18,7 +18,12 @@ layout(push_constant) uniform PushConstants {
 
 void main() {
     float dist = texture(sdfSampler, inUV).r - 0.5;
-    float alpha = smoothstep(-0.05, 0.05, dist);
+    // Anti-alias over about one screen pixel, whatever the glyph's scale. A
+    // fixed ±0.05 band was far narrower than a pixel at small sizes (the atlas
+    // is 48 px; 13 px text samples it at ~1/4), so a 1 px stroke — the upright
+    // of a "+" — vanished depending on where it fell between pixels.
+    float w = max(fwidth(dist) * 0.75, 1e-4);
+    float alpha = smoothstep(-w, w, dist);
     if (alpha < 0.01) discard;
     outColor = vec4(pc.color.rgb, pc.color.a * alpha);
 }

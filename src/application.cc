@@ -218,6 +218,24 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
     };
     walk(root, false);
     std::fprintf(stderr, "[layout-audit] %d oversized subtree(s)\n", reported);
+
+    // FBX_LAYOUT_AUDIT=2: also dump the tree's first levels — position, size,
+    // flags and first text — to see how a window is actually laid out.
+    const char* level = std::getenv("FBX_LAYOUT_AUDIT");
+    if (!level || std::string_view(level) != "2") return;
+    std::function<void(const RenderNode&, int, float, float)> dump =
+        [&](const RenderNode& n, int depth, float ox, float oy) {
+            Offset o = n.getOffset();
+            Size sz = n.getSize();
+            float x = ox + o.x_, y = oy + o.y_;
+            std::string t;
+            if (auto* rt = dynamic_cast<const RenderText*>(&n)) t = " \"" + rt->text().substr(0, 30) + "\"";
+            std::fprintf(stderr, "[layout-dump] %*s%.0f,%.0f %.0fx%.0f%s%s\n", depth * 2, "", x, y,
+                         sz.width_, sz.height_, n.isVisible() ? "" : " hidden", t.c_str());
+            if (depth < 9)
+                for (const auto& c : n.children()) dump(*c, depth + 1, x, y);
+        };
+    dump(root, 0, 0, 0);
 }
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
@@ -432,6 +450,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                 for (auto style : {fbx::xrender::FontStyle::Normal, fbx::xrender::FontStyle::Italic})
                     (void)fbx::xrender::FontManager::getFace(family, weight, style);
         (void)fbx::xrender::FontManager::getEmojiFace();
+        (void)fbx::xrender::FontManager::getLastResortFace();
 
         // Enter capability mode — global namespace (filesystem, new sockets) now inaccessible.
         if (cap_enter() == 0) {
@@ -698,7 +717,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         (void)root_node->layout(c);
 
         {
-            static const bool audit = [] { const char* e = std::getenv("FBX_LAYOUT_AUDIT"); return e && *e == '1'; }();
+            static const bool audit = [] { const char* e = std::getenv("FBX_LAYOUT_AUDIT"); return e && (*e == '1' || *e == '2'); }();
             static int audit_frame = 0;
             if (audit && ++audit_frame == 3) auditLayout(*root_node, static_cast<float>(window_w), static_cast<float>(window_h));
         }

@@ -205,6 +205,27 @@ TEST_F(EngineRenderTest, ShapedGlyphsHaveInternalGaps) {
         << "shaped glyphs must leave gaps between marks (not a solid block)";
 }
 
+// Glyphs from the last-resort fallback face (← → ↻ aren't in the UI font)
+// render, and adding them to the atlas doesn't damage glyphs already there or
+// added after: a "+" keeps both strokes (it once lost its vertical one).
+TEST_F(EngineRenderTest, FallbackGlyphsRenderAndKeepOthersIntact) {
+    auto arrows = renderText(eng_, "\u2190\u2192\u21BB", Color{1.0f, 1.0f, 1.0f, 1.0f}, 32.0f);
+    ASSERT_EQ(arrows.size(), kW * kH);
+    EXPECT_GT(countWhite(arrows), 20) << "fallback glyphs (arrows) should draw";
+
+    auto plus = renderText(eng_, "+", Color{1.0f, 1.0f, 1.0f, 1.0f}, 48.0f);
+    int min_x = kW, max_x = -1, min_y = kH, max_y = -1;
+    for (uint32_t y = 0; y < kH; ++y)
+        for (uint32_t x = 0; x < kW; ++x)
+            if (isWhite(plus[y * kW + x])) {
+                min_x = std::min<int>(min_x, x); max_x = std::max<int>(max_x, x);
+                min_y = std::min<int>(min_y, y); max_y = std::max<int>(max_y, y);
+            }
+    ASSERT_GE(max_x, 0) << "the plus sign should draw";
+    const int w = max_x - min_x + 1, h = max_y - min_y + 1;
+    EXPECT_GT(h, w / 2) << "a '+' is about as tall as it is wide (got " << w << "x" << h << ")";
+}
+
 // ── Image / texture pipeline ─────────────────────────────────────────────────────
 // Drives image_pipeline_ (a sampled texture uploaded via getOrCreateImageDescriptor).
 // Uses green/black texels, which are unaffected by any R/B channel swap, so the
