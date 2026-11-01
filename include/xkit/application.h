@@ -73,6 +73,21 @@ public:
     // the event (e.g. Ctrl+S for save) so a focused text field never sees it.
     static void setOnShortcut(std::function<bool(const fbx::shared::InputMessage&)> cb) noexcept;
 
+    // Called once per frame, before the widget tree is synced and laid out.
+    static void setOnFrame(std::function<void()> cb) noexcept;
+
+    // Run `fn` on the UI thread (at the start of the next frame). Widgets are
+    // not thread-safe: a background thread (a download, a search) must hand
+    // any widget change or state the UI reads to the UI thread with this —
+    // changing them directly races the frame that's reading them. Thread-safe.
+    static void post(std::function<void()> fn) noexcept;
+
+    // Keyboard focus: move it to the next / previous control (as Tab /
+    // Shift+Tab do), or to a given widget (a text field also starts editing).
+    // focusWidget returns false if the widget isn't on screen.
+    static void moveFocus(bool forward) noexcept;
+    static bool focusWidget(const std::shared_ptr<Widget>& widget) noexcept;
+
     // ── Gamepad ────────────────────────────────────────────────────────────
     // Register a callback invoked for every GamepadButton or GamepadAxis
     // event forwarded by the compositor to this app.

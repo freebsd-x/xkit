@@ -24,6 +24,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #ifdef __FreeBSD__
 #include <sys/capsicum.h>
 #endif
@@ -31,6 +32,10 @@
 namespace fbx::xkit {
 
 static std::shared_ptr<Element> g_focused_element = nullptr;
+static std::weak_ptr<RenderNode>  g_root_node;        // the window's render tree (for focus moves)
+static std::function<void()>      g_frame_cb;         // XApplication::setOnFrame
+static std::mutex                         g_post_mu;  // XApplication::post queue
+static std::vector<std::function<void()>> g_posted;
 static std::shared_ptr<XBusClient> g_xbus = nullptr;
 static uint32_t g_surface_id = 0;
 
@@ -118,6 +123,35 @@ static std::string nearestLabel(const RenderNode& node) {
     for (int up = 0; p && up < 3; ++up, p = p->parent())
         if (auto t = firstMeaningfulText(*p, &node); !t.empty()) return t;
     return {};
+}
+
+static void moveFocusFrom(const RenderNode& root, bool forward);   // keyboard focus traversal, below
+static void focusElement(const std::shared_ptr<Element>& el);
+
+void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = std::move(cb); }
+
+void XApplication::post(std::function<void()> fn) noexcept {
+    std::lock_guard<std::mutex> lk(g_post_mu);
+    g_posted.push_back(std::move(fn));
+}
+
+void XApplication::moveFocus(bool forward) noexcept {
+    if (auto root = g_root_node.lock()) moveFocusFrom(*root, forward);
+}
+
+bool XApplication::focusWidget(const std::shared_ptr<Widget>& widget) noexcept {
+    auto root = g_root_node.lock();
+    if (!root || !widget) return false;
+    std::shared_ptr<Element> found;
+    std::function<void(const RenderNode&)> walk = [&](const RenderNode& n) {
+        if (found) return;
+        if (auto el = n.getOwnerElement(); el && el->sourceWidget() == widget) { found = el; return; }
+        for (const auto& c : n.children()) walk(*c);
+    };
+    walk(*root);
+    if (!found) return false;
+    focusElement(found);
+    return true;
 }
 
 void XApplication::requestFocus(std::shared_ptr<Element> element) noexcept {
@@ -271,28 +305,37 @@ static void clickElement(const std::shared_ptr<Element>& el) {
     (void)el->handleEvent(m);
 }
 
+// Focus the element (a field also starts editing), announce it, ring it.
+static void focusElement(const std::shared_ptr<Element>& el) {
+    auto node = el->getRenderNode();
+    if (node && node->cursor() == CursorShape::Text) clickElement(el);   // a field starts editing
+    XApplication::requestFocus(el);   // also announces it for the screen reader
+    setFocusRing(el);
+}
+
+// Move keyboard focus to the next / previous control under `root`.
+static void moveFocusFrom(const RenderNode& root, bool forward) {
+    std::vector<std::shared_ptr<Element>> stops;
+    collectFocusable(root, stops);
+    if (stops.empty()) return;
+    auto cur = XApplication::getFocusedElement();
+    auto it = std::find(stops.begin(), stops.end(), cur);
+    size_t i;
+    if (it == stops.end()) i = forward ? 0 : stops.size() - 1;
+    else {
+        const size_t at = static_cast<size_t>(it - stops.begin());
+        i = forward ? (at + 1) % stops.size() : (at + stops.size() - 1) % stops.size();
+    }
+    focusElement(stops[i]);
+}
+
 // Handle Tab / Shift+Tab / Enter / Space. True if consumed.
 static bool handleFocusKeys(const shared::InputMessage& in, const RenderNode& root) {
     if (in.type_ != shared::InputEventType::KeyPress || in.value_b_ == 0) return false;
     constexpr int kTab = 15, kEnter = 28, kSpace = 57, kKpEnter = 96;
     const bool shift = (in.modifiers_ & 1u) != 0;
     if (in.value_a_ == kTab && !(in.modifiers_ & (2u | 4u | 8u))) {   // not Ctrl/Alt/Super+Tab
-        std::vector<std::shared_ptr<Element>> stops;
-        collectFocusable(root, stops);
-        if (stops.empty()) return true;
-        auto cur = XApplication::getFocusedElement();
-        auto it = std::find(stops.begin(), stops.end(), cur);
-        size_t i;
-        if (it == stops.end()) i = shift ? stops.size() - 1 : 0;
-        else {
-            size_t at = static_cast<size_t>(it - stops.begin());
-            i = shift ? (at + stops.size() - 1) % stops.size() : (at + 1) % stops.size();
-        }
-        auto next = stops[i];
-        auto node = next->getRenderNode();
-        if (node && node->cursor() == CursorShape::Text) clickElement(next);   // a field starts editing
-        XApplication::requestFocus(next);   // also announces it for the screen reader
-        setFocusRing(next);
+        moveFocusFrom(root, !shift);
         return true;
     }
     if (in.value_a_ == kEnter || in.value_a_ == kKpEnter || in.value_a_ == kSpace) {
@@ -699,6 +742,32 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                       for (size_t input_i = 0; input_i < input_count; ++input_i) {
                         shared::InputMessage input_msg = raws[input_i];
 
+                        // Actions addressed to the app rather than a widget (the
+                        // shell's Super+Space search, Super+C dashboard…): hand them
+                        // to the app's broadcast handler as an InputMessage payload
+                        // with no service name — the widgets never use them, and
+                        // the shell's handler reads them from a broadcast payload.
+                        {
+                            using T = shared::InputEventType;
+                            const T t = input_msg.type_;
+                            const bool for_widgets =
+                                t == T::MouseMove || t == T::MouseButton || t == T::MouseWheel ||
+                                t == T::KeyPress || t == T::ThemeChanged ||
+                                t == T::TouchDown || t == T::TouchMove || t == T::TouchUp ||
+                                t == T::StylusDown || t == T::StylusMove || t == T::StylusUp ||
+                                t == T::StylusProximity || t == T::GesturePinchBegin ||
+                                t == T::GesturePinchUpdate || t == T::GesturePinchEnd ||
+                                t == T::ImePreedit || t == T::ImeCommit ||
+                                t == T::GamepadButton || t == T::GamepadAxis;
+                            if (!for_widgets) {
+                                shared::XBusMessage action{};
+                                action.magic_ = shared::XBUS_MAGIC;
+                                std::memcpy(action.payload_, &input_msg, sizeof(input_msg));
+                                g_xbus->deliverBroadcast(action);
+                                continue;
+                            }
+                        }
+
                         // The compositor delivers surface-local absolute coordinates
                         // for mouse motion (it used to send relative deltas that the
                         // client accumulated, which drifted for off-centre windows and
@@ -832,8 +901,15 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
 
         ticker.tick(dt);
 
+        {   // work posted from other threads runs here, on the UI thread
+            std::vector<std::function<void()>> posted;
+            { std::lock_guard<std::mutex> lk(g_post_mu); posted.swap(g_posted); }
+            for (auto& fn : posted) if (fn) fn();
+        }
+        if (g_frame_cb) g_frame_cb();   // before this frame's sync and layout
         Constraints c{0, (float)window_w, 0, (float)window_h};
         auto root_node = root_element->getRenderNode();
+        g_root_node = root_node;
         root_element->syncState();
         (void)root_node->layout(c);
 

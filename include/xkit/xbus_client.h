@@ -27,6 +27,11 @@ public:
     void Call(const std::string& service, uint32_t opcode, std::span<const uint8_t> payload, ResponseCallback callback, std::optional<xserver::UniqueFd> fd_opt = std::nullopt) noexcept;
 
     void OnBroadcast(BroadcastCallback callback) noexcept { broadcast_callback_ = std::move(callback); }
+    // Hand a message to the broadcast callback directly (XApplication uses it
+    // for compositor actions that arrive as raw input).
+    void deliverBroadcast(const fbx::shared::XBusMessage& msg) noexcept {
+        if (broadcast_callback_) broadcast_callback_(msg);
+    }
 
     // Handles incoming messages on the socket. Returns true if it was an XBus message and consumed it.
     bool HandleIncoming(const std::span<const uint8_t>& data) noexcept;
