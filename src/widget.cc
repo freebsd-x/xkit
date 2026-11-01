@@ -308,6 +308,10 @@ public:
         if (auto container = std::dynamic_pointer_cast<ContainerWidget>(widget_)) child_widget = container->child();
         else if (auto scroll = std::dynamic_pointer_cast<ScrollViewWidget>(widget_)) child_widget = scroll->child();
         else if (auto button = std::dynamic_pointer_cast<ButtonWidget>(widget_)) child_widget = button->child();
+        // These two were missing: their content was never mounted (Maps' map,
+        // ImageViewer's image and anything draggable rendered nothing).
+        else if (auto gesture = std::dynamic_pointer_cast<GestureDetectorWidget>(widget_)) child_widget = gesture->child();
+        else if (auto drag = std::dynamic_pointer_cast<DragSourceWidget>(widget_)) child_widget = drag->child();
 
         if (child_widget && child_widget->isVisible()) {
             child_element_ = child_widget->createElement();

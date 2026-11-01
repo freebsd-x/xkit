@@ -14,6 +14,7 @@
 #include "shared/logger.h"
 #include <iostream>
 #include <thread>
+#include <atomic>
 #include <chrono>
 #include <algorithm>
 #include <cctype>
@@ -149,6 +150,12 @@ static void moveFocusFrom(const RenderNode& root, bool forward);   // keyboard f
 static void focusElement(const std::shared_ptr<Element>& el);
 
 void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = std::move(cb); }
+
+static std::atomic<std::thread::id> g_ui_thread{};
+
+bool XApplication::onUiThread() noexcept {
+    return g_ui_thread.load() == std::this_thread::get_id();
+}
 
 void XApplication::post(std::function<void()> fn) noexcept {
     std::lock_guard<std::mutex> lk(g_post_mu);
@@ -420,6 +427,7 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
 }
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
+    g_ui_thread = std::this_thread::get_id();
     (void)allow_background;
     fbx::shared::Logger::init(is_shell ? "xshell" : "xapp");
     // Backtrace on fatal faults, before anything can crash. Installed pre-sandbox;
@@ -750,7 +758,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                         return 0;
                     }
                 }
-                if (!g_xbus->HandleIncoming(data)) {
+                if (!g_xbus->HandleIncoming(data, &msg_res.value().second)) {
                     // The unframed SOCK_STREAM transport can coalesce several
                     // InputMessages into one recvmsg — a single key produces a
                     // press *and* a release, written back-to-back, and fast

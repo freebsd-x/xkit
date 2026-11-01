@@ -45,7 +45,10 @@ public:
         img.y_           = off.y_;
         img.width_       = size_.width_;
         img.height_      = size_.height_;
-        img.texture_id_  = 0;
+        // A new frame is new content: a new id, so the engine uploads it
+        // instead of reusing the last frame's texture (same buffer address).
+        if (buf_->dirty.load() || !frame_id_) frame_id_ = nextImageId();
+        img.texture_id_  = frame_id_;
         img.pixel_ptr_   = buf_->pixels.data();
         img.pixel_width_ = buf_->width;
         img.pixel_height_= buf_->height;
@@ -57,6 +60,7 @@ public:
 private:
     std::shared_ptr<VideoFrameBuffer> buf_;
     float view_w_, view_h_;
+    uint32_t frame_id_ = 0;
 };
 
 // ── VideoElement ──────────────────────────────────────────────────────────────

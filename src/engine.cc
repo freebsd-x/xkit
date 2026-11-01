@@ -105,9 +105,11 @@ VulkanEngine::~VulkanEngine() {
         if (atlas_memory_) vkFreeMemory(device_, atlas_memory_, nullptr);
         if (atlas_image_) vkDestroyImage(device_, atlas_image_, nullptr);
 
-        for (auto& pair : uploaded_image_views_) vkDestroyImageView(device_, pair.second, nullptr);
-        for (auto& pair : uploaded_image_memories_) vkFreeMemory(device_, pair.second, nullptr);
-        for (auto& pair : uploaded_images_) vkDestroyImage(device_, pair.second, nullptr);
+        for (auto& [key, u] : uploaded_) {
+            if (u.view) vkDestroyImageView(device_, u.view, nullptr);
+            if (u.image) vkDestroyImage(device_, u.image, nullptr);
+            if (u.memory) vkFreeMemory(device_, u.memory, nullptr);
+        }
 
         vkDestroyDevice(device_, nullptr);
     }
@@ -182,8 +184,10 @@ bool VulkanEngine::init(int w, int h) {
     VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     vkCreateDescriptorSetLayout(device_, &lci, nullptr, &image_set_layout_);
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100};
-    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 100, 1, &ps};
+    // Freeable sets: image textures come and go (evictUnusedImages).
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr,
+                                    VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 256, 1, &ps};
     vkCreateDescriptorPool(device_, &dpci, nullptr, &descriptor_pool_);
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, nullptr, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0, VK_FALSE, 0, VK_FALSE, VK_COMPARE_OP_NEVER, 0, 0, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE};
     vkCreateSampler(device_, &si, nullptr, &sampler_);
@@ -284,6 +288,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     // Draw into the buffer the compositor is NOT currently sampling.
     const int buf_idx = current_buffer_;
     vkWaitForFences(device_, 1, &render_fence_, VK_TRUE, UINT64_MAX); vkResetFences(device_, 1, &render_fence_);
+    evictUnusedImages();   // the last frame's GPU work is done: safe to free what it didn't use
     fbx::xrender::DisplayList dl; root->paint(dl, {0,0});
 
     // Ensure every glyph this frame's text needs is present in the atlas, then
@@ -354,7 +359,10 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
         } else if (cmd.type_ == fbx::shared::CommandType::DrawImage) {
             const auto* id = reinterpret_cast<const fbx::shared::ImageData*>(dl.getDataBuffer().data() + cmd.data_offset_);
             if (id->pixel_ptr_) {
-                VkDescriptorSet set = getOrCreateImageDescriptor(id->pixel_ptr_, id->pixel_width_, id->pixel_height_, id->pixel_width_ * id->pixel_height_ * 4);
+                const uint64_t key = id->texture_id_ ? (uint64_t{1} << 63) | id->texture_id_
+                                                     : reinterpret_cast<uintptr_t>(id->pixel_ptr_);
+                VkDescriptorSet set = getOrCreateImageDescriptor(key, id->pixel_ptr_, id->pixel_width_, id->pixel_height_, id->pixel_width_ * id->pixel_height_ * 4);
+                if (!set) continue;
                 vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, image_pipeline_);
                 vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, image_pipeline_layout_, 0, 1, &set, 0, nullptr);
                 // Push constants must match ui_image.vert's std430 layout exactly:
@@ -503,8 +511,28 @@ std::vector<uint32_t> VulkanEngine::readbackPixels(uint32_t w, uint32_t h) {
     return p;
 }
 
-VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t size) {
-    if (image_descriptors_.contains(pixels)) return image_descriptors_[pixels];
+void VulkanEngine::releaseImage(UploadedImage& u) noexcept {
+    if (u.set) vkFreeDescriptorSets(device_, descriptor_pool_, 1, &u.set);
+    if (u.view) vkDestroyImageView(device_, u.view, nullptr);
+    if (u.image) vkDestroyImage(device_, u.image, nullptr);
+    if (u.memory) vkFreeMemory(device_, u.memory, nullptr);
+    u = {};
+}
+
+void VulkanEngine::evictUnusedImages() noexcept {
+    for (auto it = uploaded_.begin(); it != uploaded_.end();) {
+        if (it->second.last_frame < frame_no_) { releaseImage(it->second); it = uploaded_.erase(it); }
+        else ++it;
+    }
+    ++frame_no_;
+}
+
+VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(uint64_t key, const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t size) {
+    if (auto it = uploaded_.find(key); it != uploaded_.end()) {
+        it->second.last_frame = frame_no_;
+        return it->second.set;
+    }
+    if (!pixels || w == 0 || h == 0) return VK_NULL_HANDLE;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,0,0,VK_IMAGE_TYPE_2D, (size == w*h ? VK_FORMAT_R8_UNORM : VK_FORMAT_B8G8R8A8_UNORM), {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
     VkImage img; vkCreateImage(device_, &ii, 0, &img);
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, img, &mr);
@@ -534,12 +562,17 @@ VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(const uint8_t* pixels, 
     VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,0,0,img,VK_IMAGE_VIEW_TYPE_2D,ii.format,ident,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
     VkImageView view; vkCreateImageView(device_, &vi, 0, &view);
     VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,0,descriptor_pool_,1,&image_set_layout_};
-    VkDescriptorSet set; vkAllocateDescriptorSets(device_, &dsai, &set);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device_, &dsai, &set) != VK_SUCCESS) {
+        // Pool exhausted (more than 255 distinct images in one frame): skip it.
+        vkDestroyImageView(device_, view, nullptr); vkDestroyImage(device_, img, nullptr); vkFreeMemory(device_, mem, nullptr);
+        return VK_NULL_HANDLE;
+    }
     VkDescriptorImageInfo dii{sampler_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,set,0,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&dii,0,0};
     vkUpdateDescriptorSets(device_, 1, &wds, 0, 0);
-    uploaded_image_views_[pixels] = view; uploaded_image_memories_[pixels] = mem; uploaded_images_[pixels] = img;
-    image_descriptors_[pixels] = set; return set;
+    uploaded_[key] = {set, img, mem, view, frame_no_};
+    return set;
 }
 
 uint32_t VulkanEngine::findMemoryType(uint32_t f, VkMemoryPropertyFlags p) const {

@@ -11,6 +11,7 @@ xkit_srcs = files(
   'src/widget.cc',
   'src/application.cc',
   'src/xbus_client.cc',
+  'src/fetch.cc',
   'src/clipboard.cc',
   'src/translator.cc',
   'src/a11y_phrasing.cc',

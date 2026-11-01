@@ -28,7 +28,9 @@ void XBusClient::Call(const std::string& service, uint32_t opcode, std::span<con
     (void)socket_->sendMessage(msg_span, fd_opt ? fd_opt->get() : -1);
 }
 
-bool XBusClient::HandleIncoming(const std::span<const uint8_t>& data) noexcept {
+bool XBusClient::HandleIncoming(const std::span<const uint8_t>& data, xserver::UniqueFd* fd) noexcept {
+    incoming_fd_ = fd;
+    struct Reset { xserver::UniqueFd*& p; ~Reset() { p = nullptr; } } reset{incoming_fd_};
     // The live transport is SOCK_SEQPACKET, so each recvmsg delivers exactly one
     // datagram and `data` normally holds a single XBusMessage. This loop is kept
     // as defence-in-depth: XBusMessage is fixed-size, so a buffer that ever does

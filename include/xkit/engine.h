@@ -130,18 +130,29 @@ private:
     VkImageView atlas_view_{VK_NULL_HANDLE};
     VkDescriptorSet atlas_descriptor_set_{VK_NULL_HANDLE};
 
-    // Tracking images to descriptors
-    std::unordered_map<const uint8_t*, VkDescriptorSet> image_descriptors_;
-    std::unordered_map<const uint8_t*, VkImage> uploaded_images_;
-    std::unordered_map<const uint8_t*, VkDeviceMemory> uploaded_image_memories_;
-    std::unordered_map<const uint8_t*, VkImageView> uploaded_image_views_;
+    // Uploaded DrawImage textures, by ImageData::texture_id_ (content identity;
+    // the pixel address only when no id is given). An image not drawn in a
+    // frame is released at the start of the next one — they used to live
+    // forever, and after the descriptor pool's 100 sets every new image drew
+    // black (Maps, which redraws per tile, went black within seconds).
+    struct UploadedImage {
+        VkDescriptorSet set{VK_NULL_HANDLE};
+        VkImage         image{VK_NULL_HANDLE};
+        VkDeviceMemory  memory{VK_NULL_HANDLE};
+        VkImageView     view{VK_NULL_HANDLE};
+        uint64_t        last_frame{0};
+    };
+    std::unordered_map<uint64_t, UploadedImage> uploaded_;
+    uint64_t frame_no_{0};
+    void releaseImage(UploadedImage& u) noexcept;
+    void evictUnusedImages() noexcept;
 
     bool initVulkan(int w, int h);
     void uploadFontAtlas();
     // Re-copy the (grown) CPU atlas page into the existing GPU atlas image.
     // Called when new glyphs were added mid-session (font_atlas_->isDirty()).
     void reuploadFontAtlas();
-    VkDescriptorSet getOrCreateImageDescriptor(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t size);
+    VkDescriptorSet getOrCreateImageDescriptor(uint64_t key, const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t size);
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
 
     VkCommandBuffer command_buffer_{VK_NULL_HANDLE};

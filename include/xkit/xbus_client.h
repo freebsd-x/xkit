@@ -34,13 +34,21 @@ public:
     }
 
     // Handles incoming messages on the socket. Returns true if it was an XBus message and consumed it.
-    bool HandleIncoming(const std::span<const uint8_t>& data) noexcept;
+    // `fd`: the descriptor that came with this read (SCM_RIGHTS), if any. A
+    // reply callback can claim it with takeIncomingFd(); unclaimed, it closes.
+    bool HandleIncoming(const std::span<const uint8_t>& data, xserver::UniqueFd* fd = nullptr) noexcept;
+
+    // Inside a reply/broadcast callback: the fd attached to that message.
+    [[nodiscard]] xserver::UniqueFd takeIncomingFd() noexcept {
+        return incoming_fd_ ? std::move(*incoming_fd_) : xserver::UniqueFd{};
+    }
 
 private:
     std::shared_ptr<xserver::IpcSocket> socket_;
     uint32_t next_transaction_id_{1};
     std::unordered_map<uint32_t, ResponseCallback> pending_requests_;
     BroadcastCallback broadcast_callback_;
+    xserver::UniqueFd* incoming_fd_ = nullptr;   // valid only during HandleIncoming
 };
 
 } // namespace fbx::xkit

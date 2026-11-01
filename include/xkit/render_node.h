@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 #include "xkit/layout.h"
 #include "xkit/theme.h"
@@ -734,12 +735,21 @@ private:
     float scroll_x_{0.0f};
 };
 
+// A new id for image content (ImageData::texture_id_): the engine caches each
+// uploaded texture by it, so new pixels never reuse a stale texture — even when
+// malloc hands the new buffer the old one's address. Never 0.
+inline uint32_t nextImageId() noexcept {
+    static std::atomic<uint32_t> next{1};
+    uint32_t id = next.fetch_add(1);
+    return id ? id : next.fetch_add(1);
+}
+
 class RenderImage : public RenderNode {
 public:
     RenderImage(std::vector<uint8_t> pixels, uint32_t pw, uint32_t ph, float width, float height,
                 fbx::xkit::ImageFitMode fit = fbx::xkit::ImageFitMode::Stretch) noexcept
         : pixels_(std::move(pixels)), pixelWidth_(pw), pixelHeight_(ph),
-          width_(width), height_(height), fitMode_(fit) {}
+          width_(width), height_(height), fitMode_(fit), imageId_(nextImageId()) {}
 
     [[nodiscard]] Size performLayout(const Constraints& constraints) noexcept override {
         if (fitMode_ == fbx::xkit::ImageFitMode::Contain && pixelWidth_ > 0 && pixelHeight_ > 0) {
@@ -777,7 +787,7 @@ public:
         fbx::shared::ImageData imgData = {
             .x_ = globalOffset.x_, .y_ = globalOffset.y_,
             .width_ = size_.width_, .height_ = size_.height_,
-            .texture_id_ = 0,
+            .texture_id_ = imageId_,
             .pixel_ptr_ = pixels_.data(),
             .pixel_width_ = pixelWidth_,
             .pixel_height_ = pixelHeight_,
@@ -795,6 +805,7 @@ private:
     uint32_t                pixelWidth_, pixelHeight_;
     float                   width_, height_;
     fbx::xkit::ImageFitMode fitMode_;
+    uint32_t                imageId_;
 };
 
 class RenderWrapRow : public RenderNode {

@@ -81,6 +81,8 @@ public:
     // any widget change or state the UI reads to the UI thread with this —
     // changing them directly races the frame that's reading them. Thread-safe.
     static void post(std::function<void()> fn) noexcept;
+    // Is the caller on the UI thread (the one running XApplication::Run)?
+    static bool onUiThread() noexcept;
 
     // Keyboard focus: move it to the next / previous control (as Tab /
     // Shift+Tab do), or to a given widget (a text field also starts editing).
