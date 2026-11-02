@@ -664,7 +664,7 @@ public:
         fbx::shared::RectData rect = {
             .x_ = globalOffset.x_, .y_ = globalOffset.y_, .width_ = size_.width_, .height_ = size_.height_,
             .r_ = c.r, .g_ = c.g, .b_ = c.b, .a_ = c.a,
-            .border_radius_ = radius, .shadow_blur_ = 10.0f, .shadow_alpha_ = 0.3f
+            .border_radius_ = radius, .shadow_blur_ = 8.0f, .shadow_alpha_ = 0.18f   // a soft lift, not a halo
         };
         displayList.addCommand(fbx::shared::CommandType::DrawRect, {reinterpret_cast<const uint8_t*>(&rect), sizeof(rect)});
     }

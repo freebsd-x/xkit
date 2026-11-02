@@ -27,11 +27,15 @@ void main() {
     // Box fill — smoothstepped edge for sub-pixel AA.
     float boxAlpha = 1.0 - smoothstep(-1.0, 1.0, dist);
 
-    // Drop shadow — exponential falloff outside the rounded rect.
-    // Only computed when shadow_blur > 0 and we are outside the box.
+    // Drop shadow outside the rounded rect, fading to exactly zero at the edge
+    // of the drawn quad (which the vertex shader grows by 1.5 x blur). The old
+    // exp(-dist/blur) was still ~22% strong there, so every shadow ended in a
+    // hard-edged grey box around its button.
     float shadow = 0.0;
     if (pc.shadow_blur > 0.0 && dist > 0.0) {
-        shadow = exp(-dist / pc.shadow_blur) * pc.shadow_alpha * (1.0 - boxAlpha);
+        float t = clamp(dist / (pc.shadow_blur * 1.5), 0.0, 1.0);
+        float falloff = (1.0 - t) * (1.0 - t);
+        shadow = falloff * pc.shadow_alpha * (1.0 - boxAlpha);
     }
 
     vec4 boxColor    = vec4(pc.color.rgb, pc.color.a * boxAlpha);
