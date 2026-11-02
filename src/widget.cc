@@ -116,6 +116,7 @@ void apply_widget_props(std::shared_ptr<RenderNode> node, std::shared_ptr<Widget
     node->setAlignment(widget->alignment());
     node->setStackAnchor(widget->stackAnchor());
     node->setMinTouchSize(widget->minTouchSize());
+    node->setKeepColors(widget->keepColors());
 
     // Flex container properties
     node->setGap(widget->gap());

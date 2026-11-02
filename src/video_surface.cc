@@ -129,6 +129,7 @@ XVideoSurface::XVideoSurface(uint32_t view_w, uint32_t view_h,
                                XBusClient* xbus) noexcept
     : view_w_(view_w), view_h_(view_h), xbus_(xbus) {
     setFixedSize(static_cast<float>(view_w), static_cast<float>(view_h));
+    setKeepColors(true);   // media: never adapted to the light theme
     frame_buf_ = std::make_shared<VideoFrameBuffer>();
     frame_buf_->width  = view_w;
     frame_buf_->height = view_h;

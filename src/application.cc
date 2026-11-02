@@ -476,8 +476,10 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
     const Theme theme = ThemeManager::getInstance().getCurrentTheme();
     int low = 0;
     std::set<std::string> seen;
+    adapt::active() = !ThemeManager::getInstance().isDarkMode();   // as the paint pass does
     std::function<void(const RenderNode&, Color)> walkC = [&](const RenderNode& n, Color bg) {
         if (!n.isVisible()) return;
+        RenderNode::AdaptScope adapting(n);
         Size sz = n.getSize();
         if (sz.width_ < 0.5f || sz.height_ < 0.5f) return;   // collapsed: reported above
         Color fill;

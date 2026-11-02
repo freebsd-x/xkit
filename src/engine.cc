@@ -292,6 +292,8 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     // What is behind this window's own painting, for readable unstyled text:
     // the clear colour below, or for the transparent shell the (blue) desktop
     // wallpaper. Matches the layout audit's contrast check.
+    // Light theme: adapt apps' hard-coded dark colours (render_node.h, adapt::).
+    adapt::active() = !ThemeManager::getInstance().isDarkMode();
     RenderNode::paintBackdrop() = transparent_clear_ ? Color{0.06f, 0.16f, 0.38f, 1.0f}
                                                      : ThemeManager::getInstance().windowBackground();
     fbx::xrender::DisplayList dl; root->paint(dl, {0,0});

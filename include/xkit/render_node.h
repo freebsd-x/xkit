@@ -38,10 +38,51 @@ inline Color composite(const Color& top, const Color& under) noexcept {   // `to
     const float a = std::clamp(top.a, 0.0f, 1.0f);
     return {top.r * a + under.r * (1 - a), top.g * a + under.g * (1 - a), top.b * a + under.b * (1 - a), 1.0f};
 }
+// ── Light-theme adaptation of hard-coded colours ─────────────────────────────
+// Many apps hard-code a dark design (dark grey / navy panels and buttons,
+// white / light grey text). In the light theme xkit adapts those: a dark
+// *neutral* fill becomes its light counterpart (lightness flipped, slight tint
+// kept: navy → pale blue, not yellow) — one direction only, so colours already
+// designed light, like the theme's own surfaces, are never flipped twice.
+// Coloured fills (accent, red, green) and translucent shadows stay. An app's
+// text colour is then made readable on whatever ends up behind it
+// (ensureContrast, below). A subtree marked keepColors (video, image canvas,
+// camera, map) is left exactly as painted.
+namespace adapt {
+inline bool& active() noexcept { static bool on = false; return on; }   // set per paint
+inline bool neutral(float r, float g, float b) noexcept {
+    return std::max({r, g, b}) - std::min({r, g, b}) <= 0.14f;
+}
+inline void flip(float& r, float& g, float& b) noexcept {
+    const float l = (r + g + b) / 3.0f, shift = (1.04f - l) - l;
+    r = std::clamp(r + shift, 0.0f, 1.0f); g = std::clamp(g + shift, 0.0f, 1.0f); b = std::clamp(b + shift, 0.0f, 1.0f);
+}
+inline void fill(float& r, float& g, float& b, float a) noexcept {   // a fill: dark → light
+    if (active() && a >= 0.4f && neutral(r, g, b) && (r + g + b) / 3.0f < 0.5f) flip(r, g, b);
+}
+inline Color fill(Color c) noexcept { fill(c.r, c.g, c.b, c.a); return c; }
+}  // namespace adapt
+
 inline Color readableOn(const Color& wanted, const Color& backdrop) noexcept {
     if (contrastRatio(composite(wanted, backdrop), backdrop) >= 4.5f) return wanted;
     const Color light{0.95f, 0.95f, 0.97f, 1.0f}, dark{0.08f, 0.08f, 0.10f, 1.0f};
     return contrastRatio(light, backdrop) >= contrastRatio(dark, backdrop) ? light : dark;
+}
+
+// An app's own text colour in the light theme, made readable on what is
+// actually behind it: unchanged if it already reads (4.5:1); otherwise moved
+// toward black or white — whichever side the backdrop needs — keeping its
+// hue, just far enough to read (white on a dark-red key stays white; a pale
+// blue path label designed for a dark panel becomes a deeper blue).
+inline Color ensureContrast(Color c, const Color& backdrop, float target = 4.5f) noexcept {
+    const Color seen = composite(c, backdrop);
+    if (contrastRatio(seen, backdrop) >= target) return c;
+    const float toward = luminance(backdrop) > 0.18f ? 0.0f : 1.0f;
+    for (float t = 0.1f; t <= 1.0f; t += 0.1f) {
+        Color m{c.r + (toward - c.r) * t, c.g + (toward - c.g) * t, c.b + (toward - c.b) * t, c.a};
+        if (contrastRatio(composite(m, backdrop), backdrop) >= target) return m;
+    }
+    return {toward, toward, toward, c.a};
 }
 
 enum class ImageFitMode : uint8_t {
@@ -100,9 +141,22 @@ public:
         ~BackdropScope() { paintBackdrop() = saved; }
     };
 
+    // Leave this subtree's colours exactly as painted in the light theme
+    // (media: video, an image canvas, a camera view, a map).
+    void setKeepColors(bool keep) noexcept { keep_colors_ = keep; }
+    [[nodiscard]] bool keepColors() const noexcept { return keep_colors_; }
+    struct AdaptScope {
+        bool saved;
+        explicit AdaptScope(const RenderNode& n) noexcept : saved(adapt::active()) {
+            if (n.keep_colors_) adapt::active() = false;
+        }
+        ~AdaptScope() { adapt::active() = saved; }
+    };
+
     virtual void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept {
         if (!visible_) return;
         Offset globalOffset = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        AdaptScope adapting(*this);
         BackdropScope backdrop(*this);
 
         // Group opacity: remember where this subtree's commands begin so their
@@ -121,6 +175,9 @@ public:
         }
 
         paintSelf(displayList, globalOffset);
+        // This node's own fills (background + paintSelf), adapted to the theme.
+        if (adapt::active())
+            displayList.transformRectColors(opacity_start, displayList.commandCount(), adapt::fill);
         for (const auto& child : children_) {
             child->paint(displayList, globalOffset);
         }
@@ -248,7 +305,7 @@ public:
     // The fill this node paints behind its content, if any (for the contrast audit).
     [[nodiscard]] virtual bool fillColor(const fbx::xkit::Theme&, Color& out) const noexcept {
         if (!paintsBackground()) return false;
-        out = backgroundColor_;
+        out = adapt::fill(backgroundColor_);
         return true;
     }
 
@@ -306,6 +363,7 @@ protected:
     float padding_{0};
     Color backgroundColor_{0,0,0,0};
     bool hasBackground_{false};
+    bool keep_colors_{false};
     float fixedWidth_{0}, fixedHeight_{0};
     bool hasFixedSize_{false};
     float borderRadius_{0};
@@ -612,7 +670,7 @@ public:
     }
     void setDesiredSize(float width, float height) noexcept { desiredWidth_ = width; desiredHeight_ = height; }
     [[nodiscard]] bool fillColor(const fbx::xkit::Theme& theme, Color& out) const noexcept override {
-        if (hasBackground_) { out = backgroundColor_; return out.a > 0.0f; }
+        if (hasBackground_) { out = adapt::fill(backgroundColor_); return out.a > 0.0f; }
         if (!button_layout_) return false;
         out = theme.surface;
         return true;
@@ -679,7 +737,8 @@ public:
     // The colour this text paints in over `backdrop`: its own, if it set one;
     // otherwise the theme's, made readable on what is behind it.
     [[nodiscard]] Color effectiveColor(const fbx::xkit::Theme& theme, const Color& backdrop) const noexcept {
-        return hasCustomColor_ ? customColor_ : readableOn(theme.text, backdrop);
+        if (!hasCustomColor_) return readableOn(theme.text, backdrop);
+        return adapt::active() ? ensureContrast(customColor_, backdrop) : customColor_;
     }
     void setFontWeight(fbx::xrender::FontWeight w)   noexcept { font_weight_ = w; }
     void setFontStyle(fbx::xrender::FontStyle   s)   noexcept { font_style_  = s; }
@@ -752,7 +811,9 @@ public:
     void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept override {
         if (!visible_) return;
         Offset go = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        AdaptScope adapting(*this);
         BackdropScope backdrop(*this);
+        const size_t own_start = displayList.commandCount();
 
         // Draw our own background panel (rounded if requested) before clipping
         // and painting the scrolling content. The base paint() we override would
@@ -768,6 +829,8 @@ public:
             displayList.addCommand(fbx::shared::CommandType::DrawRect,
                 {reinterpret_cast<const uint8_t*>(&bg), sizeof(bg)});
         }
+        if (adapt::active())
+            displayList.transformRectColors(own_start, displayList.commandCount(), adapt::fill);
 
         fbx::shared::ScissorData sd = {go.x_, go.y_, size_.width_, size_.height_};
         displayList.addCommand(fbx::shared::CommandType::SetScissor,
@@ -809,6 +872,7 @@ public:
     void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept override {
         if (!visible_) return;
         Offset go = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        AdaptScope adapting(*this);
         BackdropScope backdrop(*this);
         fbx::shared::ScissorData sd = {go.x_, go.y_, size_.width_, size_.height_};
         displayList.addCommand(fbx::shared::CommandType::SetScissor,

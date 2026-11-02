@@ -26,6 +26,11 @@ public:
     void setBackgroundColor(Color c) noexcept { backgroundColor_ = c; hasBackground_ = true; }
     [[nodiscard]] Color backgroundColor() const noexcept { return backgroundColor_; }
     [[nodiscard]] bool hasBackground() const noexcept { return hasBackground_; }
+    // Keep this widget's (and its children's) colours exactly as set in the
+    // light theme — for media surfaces (video, image canvas, camera, map),
+    // which xkit would otherwise adapt like any dark-designed panel.
+    void setKeepColors(bool keep) noexcept { keepColors_ = keep; }
+    [[nodiscard]] bool keepColors() const noexcept { return keepColors_; }
 
     // Corner rounding for the widget's background rect (0 = square). Lets any
     // container paint a rounded card/pill without a dedicated wrapper.
@@ -109,6 +114,7 @@ protected:
     float padding_{0};
     Color backgroundColor_{0,0,0,0};
     bool hasBackground_{false};
+    bool keepColors_{false};
     float borderRadius_{0};
     float fixedWidth_{0}, fixedHeight_{0};
     bool hasFixedSize_{false};
