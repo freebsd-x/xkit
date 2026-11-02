@@ -14,9 +14,7 @@ uint64_t Dialog::show(const std::string& title, const std::string& message,
     auto id_holder = std::make_shared<uint64_t>(0);
 
     auto title_w = std::make_shared<TextWidget>(title, 17.0f);
-    title_w->setColor(th.text);
     auto msg_w = std::make_shared<TextWidget>(message, 13.0f);
-    msg_w->setColor(th.text);
 
     // Action buttons, right-aligned along the bottom.
     std::vector<std::shared_ptr<Widget>> btns;

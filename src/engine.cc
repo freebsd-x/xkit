@@ -289,6 +289,11 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     const int buf_idx = current_buffer_;
     vkWaitForFences(device_, 1, &render_fence_, VK_TRUE, UINT64_MAX); vkResetFences(device_, 1, &render_fence_);
     evictUnusedImages();   // the last frame's GPU work is done: safe to free what it didn't use
+    // What is behind this window's own painting, for readable unstyled text:
+    // the clear colour below, or for the transparent shell the (blue) desktop
+    // wallpaper. Matches the layout audit's contrast check.
+    RenderNode::paintBackdrop() = transparent_clear_ ? Color{0.06f, 0.16f, 0.38f, 1.0f}
+                                                     : Color{0.05f, 0.05f, 0.10f, 1.0f};
     fbx::xrender::DisplayList dl; root->paint(dl, {0,0});
 
     // Ensure every glyph this frame's text needs is present in the atlas, then

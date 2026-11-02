@@ -20,6 +20,30 @@ namespace fbx::xkit {
 
 class Element;
 
+// ── Readable text ────────────────────────────────────────────────────────────
+// WCAG relative luminance / contrast ratio, and the rule unstyled text follows:
+// the theme's text colour when it reads on the fill actually behind it (4.5:1),
+// otherwise near-white or near-black, whichever reads better. Without it, the
+// light theme's black text landed on every dark panel and button that apps
+// paint themselves (and the dark window background) — unreadable.
+inline float luminance(const Color& c) noexcept {
+    auto ch = [](float v) { return v <= 0.03928f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f); };
+    return 0.2126f * ch(c.r) + 0.7152f * ch(c.g) + 0.0722f * ch(c.b);
+}
+inline float contrastRatio(const Color& a, const Color& b) noexcept {
+    const float l1 = luminance(a), l2 = luminance(b);
+    return (std::max(l1, l2) + 0.05f) / (std::min(l1, l2) + 0.05f);
+}
+inline Color composite(const Color& top, const Color& under) noexcept {   // `top` over opaque `under`
+    const float a = std::clamp(top.a, 0.0f, 1.0f);
+    return {top.r * a + under.r * (1 - a), top.g * a + under.g * (1 - a), top.b * a + under.b * (1 - a), 1.0f};
+}
+inline Color readableOn(const Color& wanted, const Color& backdrop) noexcept {
+    if (contrastRatio(composite(wanted, backdrop), backdrop) >= 4.5f) return wanted;
+    const Color light{0.95f, 0.95f, 0.97f, 1.0f}, dark{0.08f, 0.08f, 0.10f, 1.0f};
+    return contrastRatio(light, backdrop) >= contrastRatio(dark, backdrop) ? light : dark;
+}
+
 enum class ImageFitMode : uint8_t {
     Stretch, // fill display area, ignore aspect ratio
     Cover,   // scale to fill, crop excess from center
@@ -57,9 +81,29 @@ public:
 
     [[nodiscard]] virtual Size performLayout(const Constraints& constraints) noexcept = 0;
 
+    // The opaque colour painted so far behind the node being painted: the
+    // window's clear colour (set by the engine per frame) with every ancestor
+    // fill composited over it. Unstyled text reads its colour against this.
+    static Color& paintBackdrop() noexcept {
+        static Color backdrop{0.05f, 0.05f, 0.10f, 1.0f};
+        return backdrop;
+    }
+    // Composites this node's fill (if any) over the backdrop while its subtree
+    // paints, and restores it after.
+    struct BackdropScope {
+        Color saved;
+        explicit BackdropScope(const RenderNode& n) noexcept : saved(paintBackdrop()) {
+            Color fill;
+            if (n.fillColor(fbx::xkit::ThemeManager::getInstance().getCurrentTheme(), fill))
+                paintBackdrop() = composite(fill, saved);
+        }
+        ~BackdropScope() { paintBackdrop() = saved; }
+    };
+
     virtual void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept {
         if (!visible_) return;
         Offset globalOffset = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        BackdropScope backdrop(*this);
 
         // Group opacity: remember where this subtree's commands begin so their
         // alpha can be scaled down together once painted (e.g. dimming a
@@ -201,6 +245,12 @@ public:
     void setVisibility(bool v) noexcept { visible_ = v; }
     [[nodiscard]] bool isVisible() const noexcept { return visible_; }
     [[nodiscard]] bool paintsBackground() const noexcept { return hasBackground_ && backgroundColor_.a > 0.0f; }
+    // The fill this node paints behind its content, if any (for the contrast audit).
+    [[nodiscard]] virtual bool fillColor(const fbx::xkit::Theme&, Color& out) const noexcept {
+        if (!paintsBackground()) return false;
+        out = backgroundColor_;
+        return true;
+    }
 
     // ── Flex container properties (used by RenderFlexColumn / RenderFlexRow) ──
     void setGap(float g) noexcept { gap_ = g; }
@@ -541,6 +591,12 @@ public:
         return constraints.clamp(s);
     }
     void paintSelf(fbx::xrender::DisplayList& displayList, Offset globalOffset) noexcept override {
+        // Only a button gets a default (theme.surface) fill. Other boxes are
+        // wrappers (GestureDetector, DragSource, Container) and paint only an
+        // explicit background — once wrappers sized to their content, a default
+        // fill put a surface pill (white in the light theme) behind everything
+        // they wrapped.
+        if (!button_layout_ && !hasBackground_) return;
         auto theme = fbx::xkit::ThemeManager::getInstance().getCurrentTheme();
         Color c = hasBackground_ ? backgroundColor_ : theme.surface;
         // A transparent button paints nothing — no fill and, crucially, no shadow
@@ -555,6 +611,12 @@ public:
         displayList.addCommand(fbx::shared::CommandType::DrawRect, {reinterpret_cast<const uint8_t*>(&rect), sizeof(rect)});
     }
     void setDesiredSize(float width, float height) noexcept { desiredWidth_ = width; desiredHeight_ = height; }
+    [[nodiscard]] bool fillColor(const fbx::xkit::Theme& theme, Color& out) const noexcept override {
+        if (hasBackground_) { out = backgroundColor_; return out.a > 0.0f; }
+        if (!button_layout_) return false;
+        out = theme.surface;
+        return true;
+    }
 private:
     float desiredWidth_, desiredHeight_;
     bool  button_layout_{false};
@@ -613,6 +675,12 @@ public:
     void setText(const std::string& text)  noexcept { text_    = text; }
     [[nodiscard]] const std::string& text() const noexcept { return text_; }
     void setColor(Color c)                           { customColor_ = c; hasCustomColor_ = true; }
+    void clearColor() noexcept                       { hasCustomColor_ = false; }
+    // The colour this text paints in over `backdrop`: its own, if it set one;
+    // otherwise the theme's, made readable on what is behind it.
+    [[nodiscard]] Color effectiveColor(const fbx::xkit::Theme& theme, const Color& backdrop) const noexcept {
+        return hasCustomColor_ ? customColor_ : readableOn(theme.text, backdrop);
+    }
     void setFontWeight(fbx::xrender::FontWeight w)   noexcept { font_weight_ = w; }
     void setFontStyle(fbx::xrender::FontStyle   s)   noexcept { font_style_  = s; }
     void setFontFamily(std::string family)            noexcept { font_family_ = std::move(family); }
@@ -627,7 +695,7 @@ public:
     // ── Paint ─────────────────────────────────────────────────────────────
     void paintSelf(fbx::xrender::DisplayList& displayList, Offset globalOffset) noexcept override {
         auto theme = fbx::xkit::ThemeManager::getInstance().getCurrentTheme();
-        Color c = hasCustomColor_ ? customColor_ : theme.text;
+        Color c = effectiveColor(theme, paintBackdrop());
 
         fbx::shared::TextData td{};
         td.x_             = globalOffset.x_;
@@ -684,6 +752,7 @@ public:
     void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept override {
         if (!visible_) return;
         Offset go = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        BackdropScope backdrop(*this);
 
         // Draw our own background panel (rounded if requested) before clipping
         // and painting the scrolling content. The base paint() we override would
@@ -740,6 +809,7 @@ public:
     void paint(fbx::xrender::DisplayList& displayList, Offset parentOffset = {0,0}) noexcept override {
         if (!visible_) return;
         Offset go = {parentOffset.x_ + offset_.x_, parentOffset.y_ + offset_.y_};
+        BackdropScope backdrop(*this);
         fbx::shared::ScissorData sd = {go.x_, go.y_, size_.width_, size_.height_};
         displayList.addCommand(fbx::shared::CommandType::SetScissor,
             {reinterpret_cast<const uint8_t*>(&sd), sizeof(sd)});
@@ -1367,6 +1437,13 @@ public:
             return constraints.clamp(desired);
         }
         return constraints.clamp({0.0f, 0.0f});
+    }
+    // The card's own surface is what its content sits on (painted below, not
+    // via setBackgroundColor) — report it, or text inside a card was judged
+    // against the window behind the card.
+    [[nodiscard]] bool fillColor(const fbx::xkit::Theme& theme, Color& out) const noexcept override {
+        out = theme.surface;
+        return true;
     }
     void paintSelf(fbx::xrender::DisplayList& dl, Offset go) noexcept override {
         auto theme = fbx::xkit::ThemeManager::getInstance().getCurrentTheme();

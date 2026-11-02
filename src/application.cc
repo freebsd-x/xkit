@@ -15,6 +15,7 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <set>
 #include <chrono>
 #include <algorithm>
 #include <cctype>
@@ -153,6 +154,9 @@ void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = 
 
 static std::atomic<std::thread::id> g_ui_thread{};
 static std::atomic<int> g_window_w{0}, g_window_h{0};
+// What is behind the window's own painting: the engine's clear colour for an
+// app, the (blue) desktop wallpaper for the transparent shell. Contrast audit.
+static Color g_clear_color{0.05f, 0.05f, 0.10f, 1.0f};
 
 void XApplication::windowSize(int& w, int& h) noexcept {
     w = g_window_w.load();
@@ -459,6 +463,37 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
     walk0(root);
     std::fprintf(stderr, "[layout-audit] %d collapsed subtree(s)\n", collapsed);
 
+    // Contrast: each visible text against what is actually painted behind it
+    // (the fills of its ancestors, composited over the window's clear colour),
+    // by the WCAG contrast ratio. Below 3:1 is hard to read at any size — the
+    // mark of a colour hard-coded for one theme (white text in the light
+    // theme, black on a dark panel). Siblings stacked underneath and images
+    // aren't considered: a lower bound on what is checked, not a renderer.
+    const Theme theme = ThemeManager::getInstance().getCurrentTheme();
+    int low = 0;
+    std::set<std::string> seen;
+    std::function<void(const RenderNode&, Color)> walkC = [&](const RenderNode& n, Color bg) {
+        if (!n.isVisible()) return;
+        Size sz = n.getSize();
+        if (sz.width_ < 0.5f || sz.height_ < 0.5f) return;   // collapsed: reported above
+        Color fill;
+        if (n.fillColor(theme, fill)) bg = composite(fill, bg);
+        if (auto* t = dynamic_cast<const RenderText*>(&n); t && !t->text().empty()) {
+            Color fg = composite(t->effectiveColor(theme, bg), bg);   // exactly what paint chooses
+            float ratio = contrastRatio(fg, bg);
+            // Symbols (▾ ✕ •) and placeholder dashes are decoration, not reading.
+            if (ratio < 3.0f && saysSomething(t->text()) && seen.insert(t->text()).second) {
+                ++low;
+                if (low <= 25)
+                    std::fprintf(stderr, "[layout-audit] low-contrast %.1f:1 \"%s\" (text %.2f,%.2f,%.2f on %.2f,%.2f,%.2f)\n",
+                                 ratio, t->text().substr(0, 40).c_str(), fg.r, fg.g, fg.b, bg.r, bg.g, bg.b);
+            }
+        }
+        for (const auto& c : n.children()) walkC(*c, bg);
+    };
+    walkC(root, g_clear_color);
+    std::fprintf(stderr, "[layout-audit] %d low-contrast text(s)\n", low);
+
     // FBX_LAYOUT_AUDIT=2: also dump the tree's first levels — position, size,
     // flags and first text — to see how a window is actually laid out.
     const char* level = std::getenv("FBX_LAYOUT_AUDIT");
@@ -480,6 +515,7 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
     g_ui_thread = std::this_thread::get_id();
+    if (transparent_bg) g_clear_color = {0.06f, 0.16f, 0.38f, 1.0f};
     if (g_wake_pipe[0] < 0) (void)::pipe2(g_wake_pipe, O_NONBLOCK | O_CLOEXEC);
     (void)allow_background;
     fbx::shared::Logger::init(is_shell ? "xshell" : "xapp");

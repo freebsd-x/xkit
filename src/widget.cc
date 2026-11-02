@@ -379,7 +379,6 @@ std::shared_ptr<Element> TabBarWidget::createElement() noexcept {
             auto close = std::make_shared<ButtonWidget>(
                 std::string("×"), [cb = on_close_, i]() { if (cb) cb(i); });  // ×
             close->setFontSize(13.0f);
-            close->setColor(th.text);
             close->setAccessibilityLabel("Close tab");
             parts.push_back(std::move(close));
         }
@@ -604,7 +603,6 @@ private:
         style(th);
         shown_label_ = w->selectedLabel();
         auto text = std::make_shared<TextWidget>(shown_label_ + "   ▾", 13.0f);  // ▾
-        text->setColor(th.text);
         trigger_element_ = text->createElement();
         trigger_element_->mount(shared_from_this());
         renderNode_->addChild(trigger_element_->getRenderNode());
@@ -628,7 +626,6 @@ private:
                     OverlayManager::instance().dismiss(*id_holder);
                 });
             opt->setFontSize(13.0f);
-            opt->setColor(th.text);
             rows.push_back(std::move(opt));
         }
         auto col = std::make_shared<FlexColumn>(std::move(rows));
@@ -739,7 +736,6 @@ private:
         style(th);
         shown_label_ = w->formatValue();
         auto text = std::make_shared<TextWidget>(shown_label_ + "   \xE2\x96\xBE", 13.0f);  // ▾
-        text->setColor(th.text);
         trigger_element_ = text->createElement();
         trigger_element_->mount(shared_from_this());
         renderNode_->addChild(trigger_element_->getRenderNode());
@@ -766,7 +762,6 @@ private:
             btn->setBackgroundColor(a);
             btn->setBorderRadius(6.0f);
         }
-        btn->setColor(th.text);
         return btn;
     }
 
@@ -784,10 +779,8 @@ private:
         auto next = std::make_shared<ButtonWidget>(std::string("\xE2\x80\xBA"),  // ›
             [self, vy, vm]() { Date n = calendar::addMonths(Date{vy, vm, 1}, +1);
                                self->openCalendar(n.year, n.month); });
-        prev->setColor(th.text); next->setColor(th.text);
         auto title = std::make_shared<TextWidget>(
             std::string(calendar::monthName(vm)) + " " + std::to_string(vy), 13.0f);
-        title->setColor(th.text);
         auto header = std::make_shared<FlexRow>(std::vector<std::shared_ptr<Widget>>{prev, title, next});
         header->setMainAxisAlignment(MainAxisAlignment::SpaceBetween);
         header->setCrossAxisAlignment(CrossAxisAlignment::Center);
@@ -922,7 +915,6 @@ private:
         const Theme& th = ThemeManager::getInstance().getCurrentTheme();
         auto w = std::static_pointer_cast<TooltipWidget>(widget_);
         auto label = std::make_shared<TextWidget>(w->text(), 12.0f);
-        label->setColor(th.text);
         auto bubble = std::make_shared<FlexColumn>(std::vector<std::shared_ptr<Widget>>{label});
         bubble->setPadding(6.0f);
         bubble->setBackgroundColor(th.surface);
@@ -1029,9 +1021,7 @@ private:
                 seg->setBackgroundColor(th.accent);
                 seg->setBorderRadius(6.0f);
                 seg->setColor(1.0f, 1.0f, 1.0f, 1.0f);   // light text on accent
-            } else {
-                seg->setColor(th.text);
-            }
+            }   // inactive: unstyled, so it follows the theme
             auto el = seg->createElement();
             el->mount(self);
             renderNode_->addChild(el->getRenderNode());
@@ -1326,9 +1316,12 @@ public:
 
     void onThemeChanged(const Theme& theme) noexcept override {
         auto text_widget = std::static_pointer_cast<TextWidget>(widget_);
-        if (!text_widget->hasColor()) {
-            std::static_pointer_cast<RenderText>(renderNode_)->setColor(theme.text);
-        }
+        // Unstyled text stays unstyled: RenderText takes the theme's colour at
+        // paint time and makes it readable on what is behind it. Stamping
+        // theme.text here made every label look app-coloured, which skipped
+        // that (black light-theme text on dark buttons).
+        (void)theme;
+        if (!text_widget->hasColor()) std::static_pointer_cast<RenderText>(renderNode_)->clearColor();
     }
 
     [[nodiscard]] SemanticNode getSemanticTree() const noexcept override {

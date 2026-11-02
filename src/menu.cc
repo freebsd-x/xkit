@@ -27,7 +27,6 @@ uint64_t showMenu(overlay::Rect anchor, std::vector<MenuItem> items) noexcept {
             OverlayManager::instance().dismiss(*id_holder);
         });
         btn->setFontSize(13.0f);
-        btn->setColor(th.text);
         if (it.disabled) btn->setDisabled(true);   // dimmed, swallows the press
         rows.push_back(std::move(btn));
     }
