@@ -40,6 +40,13 @@ public:
         is_dark_mode_ = dark;
     }
 
+    // What an app window is cleared to before it paints: the theme's window
+    // background. (Light theme apps sat on the dark theme's navy — white cards
+    // on a dark window.) The dark navy stays the dark theme's.
+    [[nodiscard]] Color windowBackground() const noexcept {
+        return is_dark_mode_ ? Color{0.05f, 0.05f, 0.10f, 1.0f} : light_theme_.background;
+    }
+
     [[nodiscard]] bool isDarkMode() const noexcept {
         return is_dark_mode_;
     }

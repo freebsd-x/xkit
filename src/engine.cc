@@ -293,7 +293,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     // the clear colour below, or for the transparent shell the (blue) desktop
     // wallpaper. Matches the layout audit's contrast check.
     RenderNode::paintBackdrop() = transparent_clear_ ? Color{0.06f, 0.16f, 0.38f, 1.0f}
-                                                     : Color{0.05f, 0.05f, 0.10f, 1.0f};
+                                                     : ThemeManager::getInstance().windowBackground();
     fbx::xrender::DisplayList dl; root->paint(dl, {0,0});
 
     // Ensure every glyph this frame's text needs is present in the atlas, then
@@ -328,7 +328,8 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
         // Desktop shell: transparent so app windows show through the empty desktop.
         cv.color.float32[0] = 0.0f; cv.color.float32[1] = 0.0f; cv.color.float32[2] = 0.0f; cv.color.float32[3] = 0.0f;
     } else {
-        cv.color.float32[0] = 0.05f; cv.color.float32[1] = 0.05f; cv.color.float32[2] = 0.1f; cv.color.float32[3] = 1.0f; // Premium Background
+        const Color bg = ThemeManager::getInstance().windowBackground();
+        cv.color.float32[0] = bg.r; cv.color.float32[1] = bg.g; cv.color.float32[2] = bg.b; cv.color.float32[3] = 1.0f;
     }
     VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,0,render_pass_,framebuffer_[buf_idx],{{0,0},{w,h}},1,&cv};
     vkCmdBeginRenderPass(command_buffer_, &rpb, VK_SUBPASS_CONTENTS_INLINE);

@@ -154,9 +154,13 @@ void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = 
 
 static std::atomic<std::thread::id> g_ui_thread{};
 static std::atomic<int> g_window_w{0}, g_window_h{0};
-// What is behind the window's own painting: the engine's clear colour for an
-// app, the (blue) desktop wallpaper for the transparent shell. Contrast audit.
-static Color g_clear_color{0.05f, 0.05f, 0.10f, 1.0f};
+// The transparent shell paints over the (blue) desktop wallpaper; an app over
+// its theme's window background. What the contrast audit starts from.
+static bool g_transparent_window = false;
+static Color behindWindow() {
+    return g_transparent_window ? Color{0.06f, 0.16f, 0.38f, 1.0f}
+                                : ThemeManager::getInstance().windowBackground();
+}
 
 void XApplication::windowSize(int& w, int& h) noexcept {
     w = g_window_w.load();
@@ -491,7 +495,7 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
         }
         for (const auto& c : n.children()) walkC(*c, bg);
     };
-    walkC(root, g_clear_color);
+    walkC(root, behindWindow());
     std::fprintf(stderr, "[layout-audit] %d low-contrast text(s)\n", low);
 
     // FBX_LAYOUT_AUDIT=2: also dump the tree's first levels — position, size,
@@ -515,7 +519,7 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
     g_ui_thread = std::this_thread::get_id();
-    if (transparent_bg) g_clear_color = {0.06f, 0.16f, 0.38f, 1.0f};
+    g_transparent_window = transparent_bg;
     if (g_wake_pipe[0] < 0) (void)::pipe2(g_wake_pipe, O_NONBLOCK | O_CLOEXEC);
     (void)allow_background;
     fbx::shared::Logger::init(is_shell ? "xshell" : "xapp");
