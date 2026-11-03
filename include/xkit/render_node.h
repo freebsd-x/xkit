@@ -145,6 +145,10 @@ public:
     // (media: video, an image canvas, a camera view, a map).
     void setKeepColors(bool keep) noexcept { keep_colors_ = keep; }
     [[nodiscard]] bool keepColors() const noexcept { return keep_colors_; }
+
+    // The text this node shows on screen, if any (labels, and a field's
+    // displayed — for passwords, masked — contents). For FBX_UI_DUMP.
+    [[nodiscard]] virtual std::string visibleText() const { return {}; }
     struct AdaptScope {
         bool saved;
         explicit AdaptScope(const RenderNode& n) noexcept : saved(adapt::active()) {
@@ -736,6 +740,7 @@ public:
     void clearColor() noexcept                       { hasCustomColor_ = false; }
     // The colour this text paints in over `backdrop`: its own, if it set one;
     // otherwise the theme's, made readable on what is behind it.
+    [[nodiscard]] std::string visibleText() const override { return text(); }
     [[nodiscard]] Color effectiveColor(const fbx::xkit::Theme& theme, const Color& backdrop) const noexcept {
         if (!hasCustomColor_) return readableOn(theme.text, backdrop);
         return adapt::active() ? ensureContrast(customColor_, backdrop) : customColor_;

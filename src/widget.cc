@@ -1575,6 +1575,7 @@ public:
     explicit RenderTextField(float fontSize) noexcept : fontSize_(fontSize) {}
     void setDisplay(const std::string& d) noexcept { display_ = d; }
     void setPreedit(const std::string& p) noexcept { preedit_ = p; }
+    [[nodiscard]] std::string visibleText() const override { return display_ + preedit_; }   // masked for passwords
     void setCursorIndex(std::size_t c) noexcept { cursor_ = c; }
     void setSelection(std::size_t b, std::size_t e) noexcept { sel_b_ = b; sel_e_ = e; }
     void setFocused(bool f) noexcept { focused_ = f; }
@@ -1650,6 +1651,19 @@ public:
     }
     void syncState() noexcept override {
         Element::syncState();
+        // A value the app set (setText) while the field is mounted: adopt it.
+        // Only update() did, which runs when the widget is replaced — so
+        // setText on a live field (Calculator's keys, clearing a field after
+        // sending) changed text() but not the screen, and the next keystroke
+        // edited the stale text and wrote it back over the app's value.
+        // While typing the two always match (commit() writes back).
+        auto tw = std::static_pointer_cast<TextInputWidget>(widget_);
+        if (tw->text() != edit_.text) {
+            edit_.text = tw->text();
+            edit_.cursor = edit_.anchor = edit_.text.size();
+            refreshField(/*force=*/true);
+            return;
+        }
         // Keep the caret/selection in step with focus changes even when no
         // keystroke redrew this frame. Change-detected (sig_) so a steady field
         // doesn't re-emit and re-damage every frame (that caused flicker).
@@ -1942,6 +1956,21 @@ std::shared_ptr<Element> TextInputWidget::createElement() noexcept { return std:
 // the single-line cursor/selection model (TextEditState): the caret and any
 // selection are rendered on the correct line at the correct column. Return inserts
 // a newline; Ctrl+Return submits.
+// The multi-line editor's node: a column that takes the width it's given. The
+// editor soft-wraps to its own previous-frame width, so a column that
+// shrink-wrapped its content fed back on itself — the width started at the
+// placeholder's, text wrapped to it, the column shrank to the wrapped lines,
+// and so on down to one character per line. An editor fills its space;
+// unbounded (scroll sentinel) it still sizes to its content.
+class RenderEditorColumn : public RenderFlexColumn {
+public:
+    [[nodiscard]] Size performLayout(const Constraints& c) noexcept override {
+        Size s = RenderFlexColumn::performLayout(c);
+        if (c.max_width_ < 50000.0f) s.width_ = c.max_width_;
+        return s;
+    }
+};
+
 class MultilineTextInputElement : public Element {
 public:
     explicit MultilineTextInputElement(std::shared_ptr<MultilineTextInputWidget> widget) {
@@ -1949,7 +1978,7 @@ public:
         edit_.text = widget->text();
         edit_.cursor = edit_.anchor = edit_.text.size();
         fs_   = widget->fontSize();
-        renderNode_ = std::make_shared<RenderFlexColumn>();
+        renderNode_ = std::make_shared<RenderEditorColumn>();
         auto col = std::static_pointer_cast<RenderFlexColumn>(renderNode_);
         col->setCrossAxisAlignment(CrossAxisAlignment::Start);
         col->setPadding(10.0f);
@@ -1960,6 +1989,12 @@ public:
     }
     void syncState() noexcept override {
         Element::syncState();
+        // Adopt a value the app set on the live editor (see TextInputElement).
+        auto w = std::static_pointer_cast<MultilineTextInputWidget>(widget_);
+        if (w->text() != edit_.text) {
+            edit_.text = w->text();
+            edit_.cursor = edit_.anchor = edit_.text.size();
+        }
         refresh();   // change-detected: keeps the caret in step with focus
     }
     void mount(std::shared_ptr<Element> parent) noexcept override {

@@ -15,6 +15,7 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <csignal>
 #include <set>
 #include <chrono>
 #include <algorithm>
@@ -403,6 +404,28 @@ static bool handleFocusKeys(const shared::InputMessage& in, const RenderNode& ro
     return false;
 }
 
+// FBX_UI_DUMP=1: on SIGUSR1, print every visible text on screen (labels and
+// fields — a password field's masked display) with its position, between
+// "[ui-dump] begin" and "[ui-dump] end". For functional tests: inject input,
+// signal, read back what the app shows. Off unless the variable is set, so
+// SIGUSR1 keeps its default meaning everywhere else.
+static std::atomic<bool> g_ui_dump_requested{false};
+
+static void dumpUiText(const RenderNode& root) {
+    std::fprintf(stderr, "[ui-dump] begin\n");
+    std::function<void(const RenderNode&)> walk = [&](const RenderNode& n) {
+        if (!n.isVisible()) return;
+        if (std::string t = n.visibleText(); !t.empty()) {
+            Offset o = n.getAbsoluteOffset();
+            for (char& c : t) if (c == '\n') c = ' ';
+            std::fprintf(stderr, "[ui-dump] %.0f,%.0f %s\n", o.x_, o.y_, t.c_str());
+        }
+        for (const auto& c : n.children()) walk(*c);
+    };
+    walk(root);
+    std::fprintf(stderr, "[ui-dump] end\n");
+}
+
 static void auditLayout(const RenderNode& root, float window_w, float window_h) {
     auto texts = [](const RenderNode& n) {
         std::string out;
@@ -522,6 +545,8 @@ static void auditLayout(const RenderNode& root, float window_w, float window_h) 
 int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_path, bool allow_background, bool is_shell, InitCallback on_init, bool transparent_bg, uint32_t shell_surface_id) noexcept {
     g_ui_thread = std::this_thread::get_id();
     g_transparent_window = transparent_bg;
+    if (std::getenv("FBX_UI_DUMP"))
+        std::signal(SIGUSR1, [](int) { g_ui_dump_requested.store(true); });   // async-signal-safe
     if (g_wake_pipe[0] < 0) (void)::pipe2(g_wake_pipe, O_NONBLOCK | O_CLOEXEC);
     (void)allow_background;
     fbx::shared::Logger::init(is_shell ? "xshell" : "xapp");
@@ -1054,6 +1079,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
             static const bool audit = [] { const char* e = std::getenv("FBX_LAYOUT_AUDIT"); return e && (*e == '1' || *e == '2'); }();
             static int audit_frame = 0;
             if (audit && ++audit_frame == 3) auditLayout(*root_node, static_cast<float>(window_w), static_cast<float>(window_h));
+            if (g_ui_dump_requested.exchange(false)) dumpUiText(*root_node);
         }
 
         // The desktop shell: tell the compositor where its open popups are, so
