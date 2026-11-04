@@ -765,6 +765,10 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         (void)fbx::xrender::FontManager::getEmojiFace();
         (void)fbx::xrender::FontManager::getLastResortFace();
 
+        // Read the time zone now: libc loads it on first use, and in the sandbox
+        // that fails and every time shown is UTC.
+        tzset();
+
         // Sanitizer builds: let the runtime cache the module map (and start its
         // symbolizer) now; inside capability mode it can't read either, and a
         // report came out as a CHECK failure instead of a stack.

@@ -71,4 +71,38 @@ FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds time
     return future.get();
 }
 
+ConnectResult connectBlocking(const std::string& host, uint16_t port, std::chrono::milliseconds timeout) noexcept {
+    ConnectResult failed;
+    shared::NetConnectRequest req{};
+    if (XApplication::onUiThread() || host.size() >= sizeof(req.host_)) {
+        failed.error = "can't connect from here";
+        return failed;
+    }
+    req.port_ = port;
+    std::strncpy(req.host_, host.c_str(), sizeof(req.host_) - 1);
+    auto promise = std::make_shared<std::promise<ConnectResult>>();
+    auto future = promise->get_future();
+    XApplication::post([req, promise] {
+        XBusClient* bus = XApplication::getBus();
+        if (!bus) { ConnectResult none; none.error = "not connected"; promise->set_value(std::move(none)); return; }
+        bus->Call("com.freebsdx.Fetch", static_cast<uint32_t>(shared::FetchOpcode::Connect),
+                  {reinterpret_cast<const uint8_t*>(&req), sizeof(req)},
+                  [bus, promise](const shared::XBusMessage& m) {
+                      shared::NetConnectReply rep{};
+                      std::memcpy(&rep, m.payload_, sizeof(rep));
+                      rep.error_[sizeof(rep.error_) - 1] = '\0';
+                      ConnectResult r;
+                      r.status = static_cast<shared::FetchStatus>(rep.status_);
+                      r.error = rep.error_;
+                      r.socket = bus->takeIncomingFd();
+                      promise->set_value(std::move(r));
+                  });
+    });
+    if (future.wait_for(timeout) != std::future_status::ready) {
+        failed.error = "the connection timed out";
+        return failed;
+    }
+    return future.get();
+}
+
 }  // namespace fbx::xkit

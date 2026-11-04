@@ -21,6 +21,7 @@ xkit_srcs = files(
   'src/audio_player.cc',
   'src/gpu_surface.cc',
   'src/video_surface.cc',
+  'src/media_file.cc',
   # ipc_socket and xbus_message_pool are xserver primitives required by xbus_client
   '../../core/xserver/src/ipc_socket.cc',
   '../../core/xserver/src/xbus_message_pool.cc',

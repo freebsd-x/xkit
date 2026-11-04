@@ -1,4 +1,5 @@
 #include "xkit/video_surface.h"
+#include "xkit/media_file.h"
 #include "xkit/element.h"
 #include "xkit/render_node.h"
 #include "shared/protocol.h"
@@ -87,6 +88,7 @@ public:
 
 struct XVideoSurface::FfCtx {
     AVFormatContext* fmt_ctx{nullptr};
+    int              media_fd{-1};   // read through this when opened by descriptor
     AVCodecContext*  vid_ctx{nullptr};
     AVCodecContext*  aud_ctx{nullptr};
     SwsContext*      sws{nullptr};
@@ -116,7 +118,8 @@ struct XVideoSurface::FfCtx {
         if (swr)       swr_free(&swr);
         if (vid_ctx)   avcodec_free_context(&vid_ctx);
         if (aud_ctx)   avcodec_free_context(&aud_ctx);
-        if (fmt_ctx)   avformat_close_input(&fmt_ctx);
+        if (media_fd >= 0) { closeMediaFd(fmt_ctx); ::close(media_fd); }
+        else if (fmt_ctx) avformat_close_input(&fmt_ctx);
         if (shm_ptr && shm_ptr != MAP_FAILED)
             ::munmap(shm_ptr, shm_size);
         if (shm_fd >= 0) ::close(shm_fd);
@@ -150,6 +153,22 @@ bool XVideoSurface::open(const std::string& path) noexcept {
         std::cerr << "[XVideoSurface] Cannot open: " << path << "\n";
         return false;
     }
+    return attach(std::move(ff), path);
+}
+
+bool XVideoSurface::open(int fd, const std::string& name) noexcept {
+    close();
+
+    auto ff = std::make_unique<FfCtx>();
+    ff->media_fd = ::dup(fd);
+    if (ff->media_fd < 0 || !(ff->fmt_ctx = openMediaFd(ff->media_fd, name))) {
+        std::cerr << "[XVideoSurface] Cannot read: " << name << "\n";
+        return false;
+    }
+    return attach(std::move(ff), name);
+}
+
+bool XVideoSurface::attach(std::unique_ptr<FfCtx> ff, const std::string& path) noexcept {
     if (avformat_find_stream_info(ff->fmt_ctx, nullptr) < 0) {
         std::cerr << "[XVideoSurface] Cannot find stream info\n";
         return false;

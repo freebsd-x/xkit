@@ -1,6 +1,8 @@
 #pragma once
 
 #include "shared/protocol.h"
+#include "xserver/unique_fd.h"
+#include <cstdint>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -26,5 +28,17 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
 // waits for the answer, up to `timeout`.
 FetchResult fetchBlocking(const std::string& url,
                           std::chrono::milliseconds timeout = std::chrono::seconds(30)) noexcept;
+
+// A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
+// sandbox can't open sockets, so the compositor connects, if policy allows that
+// port for this app, and hands over the socket. Blocking, for worker threads only.
+struct ConnectResult {
+    shared::FetchStatus status = shared::FetchStatus::Unavailable;
+    xserver::UniqueFd   socket;
+    std::string         error;
+    [[nodiscard]] bool ok() const noexcept { return status == shared::FetchStatus::Ok && socket; }
+};
+ConnectResult connectBlocking(const std::string& host, uint16_t port,
+                              std::chrono::milliseconds timeout = std::chrono::seconds(20)) noexcept;
 
 }  // namespace fbx::xkit

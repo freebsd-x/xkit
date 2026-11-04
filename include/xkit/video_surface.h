@@ -46,8 +46,14 @@ public:
     XVideoSurface(const XVideoSurface&) = delete;
     XVideoSurface& operator=(const XVideoSurface&) = delete;
 
+    // Sound goes through the audio service on this bus; without one, video only.
+    void setBus(XBusClient* xbus) noexcept { xbus_ = xbus; }
+
     // Open a media file. Returns false on failure.
     bool open(const std::string& path) noexcept;
+    // The same from a descriptor (what a sandboxed app has); keeps its own copy.
+    // `name` is for display and format detection.
+    bool open(int fd, const std::string& name) noexcept;
     void close() noexcept;
 
     // Playback control
@@ -107,6 +113,7 @@ private:
 
     // Opaque FFmpeg state
     struct FfCtx;
+    bool attach(std::unique_ptr<FfCtx> ff, const std::string& path) noexcept;
     std::unique_ptr<FfCtx> ff_;
 };
 

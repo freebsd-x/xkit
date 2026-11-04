@@ -541,7 +541,7 @@ VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(uint64_t key, const uin
         return it->second.set;
     }
     if (!pixels || w == 0 || h == 0) return VK_NULL_HANDLE;
-    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,0,0,VK_IMAGE_TYPE_2D, (size == w*h ? VK_FORMAT_R8_UNORM : VK_FORMAT_B8G8R8A8_UNORM), {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,0,0,VK_IMAGE_TYPE_2D, (size == w*h ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM), {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
     VkImage img; vkCreateImage(device_, &ii, 0, &img);
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, img, &mr);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size, findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
