@@ -492,6 +492,7 @@ public:
         if (auto* tw = dynamic_cast<TextWidget*>(child_.get())) tw->setColor(c);
     }
     void onClick(OnPressedCallback cb) noexcept { onPressed_ = std::move(cb); }
+    void click() { if (onPressed_) onPressed_(); }   // what a press does, from code
     // Disabled state is inherited from Widget (setDisabled/isDisabled).
 
 private:
