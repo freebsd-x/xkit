@@ -389,6 +389,8 @@ static bool handleFocusKeys(const shared::InputMessage& in, const RenderNode& ro
     constexpr int kTab = 15, kEnter = 28, kSpace = 57, kKpEnter = 96;
     const bool shift = (in.modifiers_ & 1u) != 0;
     if (in.value_a_ == kTab && !(in.modifiers_ & (2u | 4u | 8u))) {   // not Ctrl/Alt/Super+Tab
+        if (auto cur = XApplication::getFocusedElement(); !shift && cur && cur->wantsTabKey())
+            return false;   // the focused element's own (a terminal's completion)
         moveFocusFrom(root, !shift);
         return true;
     }

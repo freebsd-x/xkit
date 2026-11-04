@@ -65,6 +65,11 @@ public:
     }
 
     // Event Bubbling implementation
+    // Does this element, while focused, take plain Tab itself (a terminal's
+    // completion) instead of Tab moving focus? Shift+Tab always moves focus, so
+    // a keyboard user can always leave.
+    [[nodiscard]] virtual bool wantsTabKey() const noexcept { return false; }
+
     [[nodiscard]] virtual bool handleEvent(const shared::InputMessage& event) noexcept {
         // 1. Perform hit-testing for mouse events
         if (event.type_ == shared::InputEventType::MouseMove || event.type_ == shared::InputEventType::MouseButton) {
