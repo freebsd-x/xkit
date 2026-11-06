@@ -29,6 +29,19 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
 FetchResult fetchBlocking(const std::string& url,
                           std::chrono::milliseconds timeout = std::chrono::seconds(30)) noexcept;
 
+// Browsing: any public web address, for the one client allowed to (fetch_policy.h).
+// Blocking, for worker threads. Redirects are followed: `final_url` is where it ended up.
+struct WebFetchResult {
+    shared::FetchStatus status = shared::FetchStatus::Unavailable;
+    uint32_t            http_status = 0;
+    std::string         final_url;
+    std::string         content_type;
+    std::string         body;
+    [[nodiscard]] bool ok() const noexcept { return status == shared::FetchStatus::Ok; }
+};
+WebFetchResult fetchWebBlocking(const std::string& url,
+                                std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+
 // A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
 // sandbox can't open sockets, so the compositor connects, if policy allows that
 // port for this app, and hands over the socket. Blocking, for worker threads only.

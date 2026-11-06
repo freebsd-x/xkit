@@ -1,3 +1,8 @@
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <optional>
 #include "xkit/fetch.h"
 #include "xkit/application.h"
 #include "xkit/xbus_client.h"
@@ -32,15 +37,32 @@ std::string readBody(int fd, uint64_t size) {
 
 }  // namespace
 
-void fetch(const std::string& url, std::function<void(FetchResult)> done) noexcept {
+namespace {
+
+void fetchWithFlags(const std::string& url, uint32_t flags, std::function<void(FetchResult)> done) noexcept {
     XBusClient* bus = XApplication::getBus();
     if (!bus) { if (done) done({}); return; }
     shared::FetchRequest req{};
-    std::strncpy(req.url_, url.c_str(), sizeof(req.url_) - 1);
-    if (url.size() >= sizeof(req.url_)) {   // would be truncated: never fetch a different URL
-        FetchResult r; r.status = shared::FetchStatus::BadRequest;
-        if (done) done(std::move(r));
-        return;
+    req.flags_ = flags;
+    std::optional<xserver::UniqueFd> long_url;
+    if (url.size() < sizeof(req.url_)) {
+        std::strncpy(req.url_, url.c_str(), sizeof(req.url_) - 1);
+    } else {
+        // Too long for the message. Browsing can send it in a descriptor; anything else
+        // would be truncated, and we never fetch a different URL.
+        xserver::UniqueFd fd((flags & shared::kFetchWeb) ? shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600) : -1);
+        void* map = MAP_FAILED;
+        if (fd && ::ftruncate(fd.get(), static_cast<off_t>(url.size())) == 0)
+            map = ::mmap(nullptr, url.size(), PROT_WRITE, MAP_SHARED, fd.get(), 0);
+        if (map == MAP_FAILED) {
+            FetchResult r; r.status = shared::FetchStatus::BadRequest;
+            if (done) done(std::move(r));
+            return;
+        }
+        std::memcpy(map, url.data(), url.size());
+        ::munmap(map, url.size());
+        req.flags_ |= shared::kFetchUrlInFd;
+        long_url = std::move(fd);
     }
     bus->Call("com.freebsdx.Fetch", static_cast<uint32_t>(shared::FetchOpcode::Get),
               {reinterpret_cast<const uint8_t*>(&req), sizeof(req)},
@@ -57,7 +79,40 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
                       else r.status = shared::FetchStatus::NetworkError;   // ok without a body
                   }
                   if (done) done(std::move(r));
-              });
+              },
+              std::move(long_url));
+}
+
+}  // namespace
+
+void fetch(const std::string& url, std::function<void(FetchResult)> done) noexcept {
+    fetchWithFlags(url, 0, std::move(done));
+}
+
+WebFetchResult fetchWebBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
+    WebFetchResult out;
+    if (XApplication::onUiThread()) return out;
+    auto promise = std::make_shared<std::promise<FetchResult>>();
+    auto future = promise->get_future();
+    XApplication::post([url, promise] {
+        fetchWithFlags(url, shared::kFetchWeb, [promise](FetchResult r) { promise->set_value(std::move(r)); });
+    });
+    if (future.wait_for(timeout) != std::future_status::ready) return out;
+    FetchResult r = future.get();
+    out.status = r.status;
+    out.http_status = r.http_status;
+    if (!r.ok()) return out;
+    // "<final url>\n<content type>\n<body>"
+    const size_t first = r.body.find('\n');
+    const size_t second = first == std::string::npos ? std::string::npos : r.body.find('\n', first + 1);
+    if (second == std::string::npos) {
+        out.status = shared::FetchStatus::NetworkError;
+        return out;
+    }
+    out.final_url = r.body.substr(0, first);
+    out.content_type = r.body.substr(first + 1, second - first - 1);
+    out.body = r.body.substr(second + 1);
+    return out;
 }
 
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {

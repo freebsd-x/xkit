@@ -533,6 +533,10 @@ public:
     void setPlaceholder(std::string hint) noexcept { placeholder_ = std::move(hint); }
     [[nodiscard]] const std::string& placeholder() const noexcept { return placeholder_; }
 
+    // Select everything in the field, so typing replaces it (an address bar's Ctrl+L).
+    void selectAll() noexcept { if (select_all_hook_) select_all_hook_(); }
+    void setSelectAllHook(std::function<void()> f) noexcept { select_all_hook_ = std::move(f); }
+
     // Password mode: the field stores the real text (text() returns it for auth)
     // but renders each character as '*' so it isn't shown on screen.
     void setPasswordMode(bool b) noexcept { password_ = b; }
@@ -559,6 +563,7 @@ public:
     void focus() const { if (focus_hook_) focus_hook_(); }
 
 private:
+    std::function<void()> select_all_hook_;
     std::string text_;
     std::string placeholder_;
     OnChangedCallback onChange_;

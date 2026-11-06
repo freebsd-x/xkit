@@ -274,7 +274,21 @@ public:
             }
             return false;
         }
-        // Non-mouse events (key, wheel, etc.) fan out to all children.
+        // A wheel event's values are its amount, so where it is comes from the pointer:
+        // it goes to what's under it, and not to whichever sibling takes it first.
+        if (event.type_ == shared::InputEventType::MouseWheel) {
+            float mx = 0, my = 0;
+            XApplication::cursorPosition(mx, my);
+            for (auto it = children_elements_.rbegin(); it != children_elements_.rend(); ++it) {
+                auto node = (*it)->getRenderNode();
+                if (!node->isVisible()) continue;
+                auto off = node->getAbsoluteOffset();
+                auto sz = node->getSize();
+                if (mx >= off.x_ && mx < off.x_ + sz.width_ && my >= off.y_ && my < off.y_ + sz.height_ && (*it)->handleEvent(event)) return true;
+            }
+            return false;
+        }
+        // Non-mouse events (keys, etc.) fan out to all children.
         for (auto& child : children_elements_) {
             if (child->handleEvent(event)) return true;
         }
@@ -1678,11 +1692,22 @@ public:
         tw->setFocusHook([weak]() {
             if (auto e = weak.lock()) XApplication::requestFocus(e);
         });
+        tw->setSelectAllHook([this]() {
+            edit_.selectAll();
+            last_kind_ = EditKind::Boundary;
+            refreshField();
+        });
         if (tw->autofocus()) XApplication::requestFocus(shared_from_this());
     }
     void update(std::shared_ptr<Widget> newWidget) noexcept override {
+        std::static_pointer_cast<TextInputWidget>(widget_)->setSelectAllHook(nullptr);
         widget_ = std::move(newWidget);
         auto text_widget = std::static_pointer_cast<TextInputWidget>(widget_);
+        text_widget->setSelectAllHook([this]() {
+            edit_.selectAll();
+            last_kind_ = EditKind::Boundary;
+            refreshField();
+        });
         // Adopt an externally-set value (e.g. a URL bar rewritten by code) but keep
         // the caret valid.
         if (text_widget->text() != edit_.text) {
@@ -1697,6 +1722,7 @@ public:
         refreshField(/*force=*/true);
     }
     void unmount() noexcept override {
+        std::static_pointer_cast<TextInputWidget>(widget_)->setSelectAllHook(nullptr);
         sendImeDeactivate();
         renderNode_->clearChildren();
         parent_.reset();
