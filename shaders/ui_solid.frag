@@ -25,7 +25,11 @@ void main() {
     float dist = roundedBoxSDF(fragLocalPos, halfSize, pc.border_radius);
 
     // Box fill — smoothstepped edge for sub-pixel AA.
-    float boxAlpha = 1.0 - smoothstep(-1.0, 1.0, dist);
+    // A plain square rect fills its quad exactly: softening it would only fade its
+    // edge pixels, and a 1px line would be nothing but edge.
+    float boxAlpha = (pc.border_radius <= 0.0 && pc.shadow_blur <= 0.0)
+        ? 1.0
+        : 1.0 - smoothstep(-1.0, 1.0, dist);
 
     // Drop shadow outside the rounded rect, fading to exactly zero at the edge
     // of the drawn quad (which the vertex shader grows by 1.5 x blur). The old
