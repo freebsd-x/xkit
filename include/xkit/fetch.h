@@ -41,7 +41,11 @@ struct WebFetchResult {
 };
 WebFetchResult fetchWebBlocking(const std::string& url,
                                 std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
-// A form's POST, the same way: `content_type` is one a form sends (form-urlencoded,
+// The same, with cookies sent and kept (kFetchCookies): for pages, forms and the
+// page's own site's files.
+WebFetchResult fetchWebBlocking(const std::string& url, bool cookies,
+                                std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+// A form's POST, the same way, cookies with it: `content_type` is one a form sends (form-urlencoded,
 // multipart/form-data or text/plain). The answer is followed like any page's.
 WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body,
                                std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;

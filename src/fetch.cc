@@ -107,13 +107,14 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
 
 namespace {
 
-WebFetchResult webBlocking(const std::string& url, std::optional<std::string> post, std::chrono::milliseconds timeout) noexcept {
+WebFetchResult webBlocking(const std::string& url, std::optional<std::string> post, std::chrono::milliseconds timeout, bool cookies = false) noexcept {
     WebFetchResult out;
     if (XApplication::onUiThread()) return out;
     auto promise = std::make_shared<std::promise<FetchResult>>();
     auto future = promise->get_future();
-    XApplication::post([url, promise, post = std::move(post)] {
-        fetchWithFlags(url, shared::kFetchWeb, [promise](FetchResult r) { promise->set_value(std::move(r)); }, post ? &*post : nullptr);
+    XApplication::post([url, promise, post = std::move(post), cookies] {
+        fetchWithFlags(url, shared::kFetchWeb | (cookies ? shared::kFetchCookies : 0u),
+                       [promise](FetchResult r) { promise->set_value(std::move(r)); }, post ? &*post : nullptr);
     });
     if (future.wait_for(timeout) != std::future_status::ready) return out;
     FetchResult r = future.get();
@@ -139,10 +140,14 @@ WebFetchResult fetchWebBlocking(const std::string& url, std::chrono::millisecond
     return webBlocking(url, std::nullopt, timeout);
 }
 
+WebFetchResult fetchWebBlocking(const std::string& url, bool cookies, std::chrono::milliseconds timeout) noexcept {
+    return webBlocking(url, std::nullopt, timeout, cookies);
+}
+
 WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body,
                                std::chrono::milliseconds timeout) noexcept {
     if (url.find('\n') != std::string::npos || content_type.find_first_of("\r\n") != std::string::npos) return {};
-    return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout);
+    return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout, true);
 }
 
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
