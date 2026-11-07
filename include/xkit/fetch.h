@@ -41,6 +41,10 @@ struct WebFetchResult {
 };
 WebFetchResult fetchWebBlocking(const std::string& url,
                                 std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+// A form's POST, the same way: `content_type` is one a form sends (form-urlencoded,
+// multipart/form-data or text/plain). The answer is followed like any page's.
+WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body,
+                               std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
 
 // A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
 // sandbox can't open sockets, so the compositor connects, if policy allows that

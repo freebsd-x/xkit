@@ -39,13 +39,29 @@ std::string readBody(int fd, uint64_t size) {
 
 namespace {
 
-void fetchWithFlags(const std::string& url, uint32_t flags, std::function<void(FetchResult)> done) noexcept {
+// `post`: the whole request for a kFetchPost, in a descriptor.
+void fetchWithFlags(const std::string& url, uint32_t flags, std::function<void(FetchResult)> done,
+                    const std::string* post = nullptr) noexcept {
     XBusClient* bus = XApplication::getBus();
     if (!bus) { if (done) done({}); return; }
     shared::FetchRequest req{};
     req.flags_ = flags;
     std::optional<xserver::UniqueFd> long_url;
-    if (url.size() < sizeof(req.url_)) {
+    if (post) {
+        xserver::UniqueFd fd(shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600));
+        void* map = MAP_FAILED;
+        if (fd && !post->empty() && ::ftruncate(fd.get(), static_cast<off_t>(post->size())) == 0)
+            map = ::mmap(nullptr, post->size(), PROT_WRITE, MAP_SHARED, fd.get(), 0);
+        if (map == MAP_FAILED) {
+            FetchResult r; r.status = shared::FetchStatus::BadRequest;
+            if (done) done(std::move(r));
+            return;
+        }
+        std::memcpy(map, post->data(), post->size());
+        ::munmap(map, post->size());
+        req.flags_ |= shared::kFetchPost;
+        long_url = std::move(fd);
+    } else if (url.size() < sizeof(req.url_)) {
         std::strncpy(req.url_, url.c_str(), sizeof(req.url_) - 1);
     } else {
         // Too long for the message. Browsing can send it in a descriptor; anything else
@@ -89,13 +105,15 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
     fetchWithFlags(url, 0, std::move(done));
 }
 
-WebFetchResult fetchWebBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
+namespace {
+
+WebFetchResult webBlocking(const std::string& url, std::optional<std::string> post, std::chrono::milliseconds timeout) noexcept {
     WebFetchResult out;
     if (XApplication::onUiThread()) return out;
     auto promise = std::make_shared<std::promise<FetchResult>>();
     auto future = promise->get_future();
-    XApplication::post([url, promise] {
-        fetchWithFlags(url, shared::kFetchWeb, [promise](FetchResult r) { promise->set_value(std::move(r)); });
+    XApplication::post([url, promise, post = std::move(post)] {
+        fetchWithFlags(url, shared::kFetchWeb, [promise](FetchResult r) { promise->set_value(std::move(r)); }, post ? &*post : nullptr);
     });
     if (future.wait_for(timeout) != std::future_status::ready) return out;
     FetchResult r = future.get();
@@ -113,6 +131,18 @@ WebFetchResult fetchWebBlocking(const std::string& url, std::chrono::millisecond
     out.content_type = r.body.substr(first + 1, second - first - 1);
     out.body = r.body.substr(second + 1);
     return out;
+}
+
+}  // namespace
+
+WebFetchResult fetchWebBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
+    return webBlocking(url, std::nullopt, timeout);
+}
+
+WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body,
+                               std::chrono::milliseconds timeout) noexcept {
+    if (url.find('\n') != std::string::npos || content_type.find_first_of("\r\n") != std::string::npos) return {};
+    return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout);
 }
 
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
