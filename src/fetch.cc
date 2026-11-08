@@ -150,6 +150,12 @@ WebFetchResult postWebBlocking(const std::string& url, const std::string& conten
     return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout, true);
 }
 
+WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body, bool cookies,
+                               std::chrono::milliseconds timeout) noexcept {
+    if (url.find('\n') != std::string::npos || content_type.find_first_of("\r\n") != std::string::npos) return {};
+    return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout, cookies);
+}
+
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
     if (XApplication::onUiThread()) return {};
     auto promise = std::make_shared<std::promise<FetchResult>>();

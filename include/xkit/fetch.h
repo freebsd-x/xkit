@@ -49,6 +49,9 @@ WebFetchResult fetchWebBlocking(const std::string& url, bool cookies,
 // multipart/form-data or text/plain). The answer is followed like any page's.
 WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body,
                                std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+// The same, choosing whether cookies go with it (a page's script posting to another site: not).
+WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body, bool cookies,
+                               std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
 
 // A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
 // sandbox can't open sockets, so the compositor connects, if policy allows that
