@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -59,7 +60,7 @@ void fetchWithFlags(const std::string& url, uint32_t flags, std::function<void(F
         }
         std::memcpy(map, post->data(), post->size());
         ::munmap(map, post->size());
-        req.flags_ |= shared::kFetchPost;
+        if (!(flags & shared::kFetchScript)) req.flags_ |= shared::kFetchPost;   // a script's request says so itself
         long_url = std::move(fd);
     } else if (url.size() < sizeof(req.url_)) {
         std::strncpy(req.url_, url.c_str(), sizeof(req.url_) - 1);
@@ -107,13 +108,14 @@ void fetch(const std::string& url, std::function<void(FetchResult)> done) noexce
 
 namespace {
 
-WebFetchResult webBlocking(const std::string& url, std::optional<std::string> post, std::chrono::milliseconds timeout, bool cookies = false) noexcept {
+WebFetchResult webBlocking(const std::string& url, std::optional<std::string> post, std::chrono::milliseconds timeout, bool cookies = false,
+                           bool script = false) noexcept {
     WebFetchResult out;
     if (XApplication::onUiThread()) return out;
     auto promise = std::make_shared<std::promise<FetchResult>>();
     auto future = promise->get_future();
-    XApplication::post([url, promise, post = std::move(post), cookies] {
-        fetchWithFlags(url, shared::kFetchWeb | (cookies ? shared::kFetchCookies : 0u),
+    XApplication::post([url, promise, post = std::move(post), cookies, script] {
+        fetchWithFlags(url, shared::kFetchWeb | (cookies ? shared::kFetchCookies : 0u) | (script ? shared::kFetchScript : 0u),
                        [promise](FetchResult r) { promise->set_value(std::move(r)); }, post ? &*post : nullptr);
     });
     if (future.wait_for(timeout) != std::future_status::ready) return out;
@@ -131,6 +133,26 @@ WebFetchResult webBlocking(const std::string& url, std::optional<std::string> po
     out.final_url = r.body.substr(0, first);
     out.content_type = r.body.substr(first + 1, second - first - 1);
     out.body = r.body.substr(second + 1);
+    if (script) {
+        // "<n>\n" and n bytes of "name: value\r\n" headers, then the body.
+        const size_t eol = out.body.find('\n');
+        const size_t n = eol == std::string::npos ? std::string::npos : static_cast<size_t>(std::strtoull(out.body.c_str(), nullptr, 10));
+        if (eol == std::string::npos || n > out.body.size() - eol - 1) {
+            out.status = shared::FetchStatus::NetworkError;
+            return out;
+        }
+        const std::string block = out.body.substr(eol + 1, n);
+        out.body.erase(0, eol + 1 + n);
+        size_t at = 0;
+        while (at < block.size()) {
+            size_t end = block.find("\r\n", at);
+            if (end == std::string::npos) end = block.size();
+            const std::string line = block.substr(at, end - at);
+            const size_t colon = line.find(':');
+            if (colon != std::string::npos) out.headers.emplace_back(line.substr(0, colon), line.substr(colon + 2 <= line.size() ? colon + 2 : line.size()));
+            at = end + 2;
+        }
+    }
     return out;
 }
 
@@ -154,6 +176,18 @@ WebFetchResult postWebBlocking(const std::string& url, const std::string& conten
                                std::chrono::milliseconds timeout) noexcept {
     if (url.find('\n') != std::string::npos || content_type.find_first_of("\r\n") != std::string::npos) return {};
     return webBlocking(url, url + "\n" + content_type + "\n" + body, timeout, cookies);
+}
+
+WebFetchResult scriptWebBlocking(const std::string& method, const std::string& url, const std::vector<std::pair<std::string, std::string>>& headers,
+                                 const std::string& body, bool cookies, std::chrono::milliseconds timeout) noexcept {
+    if (method.find('\n') != std::string::npos || url.find('\n') != std::string::npos) return {};
+    std::string request = method + "\n" + url + "\n";
+    for (const auto& [name, value] : headers) {
+        if (name.find_first_of("\r\n:") != std::string::npos || value.find_first_of("\r\n") != std::string::npos) continue;
+        request += name + ": " + value + "\n";
+    }
+    request += "\n" + body;
+    return webBlocking(url, std::move(request), timeout, cookies, true);
 }
 
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {

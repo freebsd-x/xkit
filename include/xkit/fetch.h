@@ -2,6 +2,8 @@
 
 #include "shared/protocol.h"
 #include "xserver/unique_fd.h"
+#include <utility>
+#include <vector>
 #include <cstdint>
 #include <chrono>
 #include <functional>
@@ -37,6 +39,7 @@ struct WebFetchResult {
     std::string         final_url;
     std::string         content_type;
     std::string         body;
+    std::vector<std::pair<std::string, std::string>> headers;   // a script's request only (lower-case names)
     [[nodiscard]] bool ok() const noexcept { return status == shared::FetchStatus::Ok; }
 };
 WebFetchResult fetchWebBlocking(const std::string& url,
@@ -52,6 +55,12 @@ WebFetchResult postWebBlocking(const std::string& url, const std::string& conten
 // The same, choosing whether cookies go with it (a page's script posting to another site: not).
 WebFetchResult postWebBlocking(const std::string& url, const std::string& content_type, const std::string& body, bool cookies,
                                std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+
+// A script's request (fetch, XMLHttpRequest): any method the broker allows, the page's
+// headers (the broker drops those a page may not set), and the response's headers back.
+WebFetchResult scriptWebBlocking(const std::string& method, const std::string& url,
+                                 const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body, bool cookies,
+                                 std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
 
 // A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
 // sandbox can't open sockets, so the compositor connects, if policy allows that
