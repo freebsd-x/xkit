@@ -28,6 +28,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#include <string>
+#include <vector>
 #if defined(__has_feature)
 #  if __has_feature(address_sanitizer) || __has_feature(undefined_behavior_sanitizer)
 #    define FBX_SANITIZED 1
@@ -752,6 +754,29 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         cap_rights_init(&io_rights, CAP_WRITE);
         (void)cap_rights_limit(STDOUT_FILENO, &io_rights);
         (void)cap_rights_limit(STDERR_FILENO, &io_rights);
+
+        // The font directories, read-only: a face first asked for after cap_enter()
+        // (a page's family, a weight like 500 nobody loaded yet) is opened through
+        // these. Without them it drew in whatever face was loaded, while layout had
+        // measured the right one: text came out clipped or overlapping.
+        {
+            std::vector<std::string> roots = {"/usr/local/share/fonts", "/usr/share/fonts"};
+            if (const char* home = std::getenv("HOME"); home && *home) {
+                roots.push_back(std::string(home) + "/.local/share/fonts");
+                roots.push_back(std::string(home) + "/.fonts");
+            }
+            cap_rights_t font_rights;
+            cap_rights_init(&font_rights, CAP_LOOKUP, CAP_READ, CAP_FSTAT, CAP_SEEK, CAP_FSTATAT, CAP_FCNTL);
+            for (const std::string& dir : roots) {
+                const int fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+                if (fd < 0) continue;
+                if (cap_rights_limit(fd, &font_rights) < 0) {
+                    close(fd);
+                    continue;
+                }
+                fbx::xrender::FontManager::addFontRoot(dir, fd);
+            }
+        }
 
         // Load the fonts text will ask for now: after cap_enter() a face can't
         // be opened any more (FreeType keeps the files it already has open),

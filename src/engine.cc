@@ -267,17 +267,16 @@ bool VulkanEngine::init(int w, int h) {
     return true;
 }
 
-// The face a text command asks for (family, weight, style). The weight snaps
-// to the ones loaded before an app's Capsicum sandbox (300/400/600/700, see
-// XApplication::Run); a face that can't be opened falls back to the default.
-// Used both to warm the glyph atlas and to draw, so the lookups match.
+// The face a text command asks for (family, weight, style), at the weight asked
+// for to the nearest hundred: what a web page's layout measured with. (A face first
+// wanted inside an app's Capsicum sandbox opens through the font directories
+// XApplication::Run kept, so no weight has to be snapped to a preloaded one.) A face
+// that can't be opened falls back to the default. Used both to warm the glyph atlas
+// and to draw, so the lookups match.
 static xrender::FontFace* faceFor(const fbx::shared::TextData* td) noexcept {
     std::string family(td->font_family_, strnlen(td->font_family_, sizeof(td->font_family_)));
-    uint16_t w = td->font_weight_ ? td->font_weight_ : 400;
-    auto weight = w < 350 ? xrender::FontWeight::Light
-                : w < 500 ? xrender::FontWeight::Regular
-                : w < 650 ? xrender::FontWeight::SemiBold
-                          : xrender::FontWeight::Bold;
+    const int w = td->font_weight_ ? td->font_weight_ : 400;
+    const auto weight = static_cast<xrender::FontWeight>(std::clamp((w + 50) / 100 * 100, 100, 900));
     auto style = td->font_style_ ? xrender::FontStyle::Italic : xrender::FontStyle::Normal;
     if (auto* f = xrender::FontManager::getFace(family, weight, style)) return f;
     return xrender::FontManager::getFace();
