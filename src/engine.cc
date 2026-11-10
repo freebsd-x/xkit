@@ -1,4 +1,8 @@
 #include "xkit/engine.h"
+#include <unordered_map>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_TRUETYPE_TABLES_H
 #include "xkit/widget.h"
 #include "xkit/render_node.h"
 #include "shared/logger.h"
@@ -273,6 +277,18 @@ bool VulkanEngine::init(int w, int h) {
 // XApplication::Run kept, so no weight has to be snapped to a preloaded one.) A face
 // that can't be opened falls back to the default. Used both to warm the glyph atlas
 // and to draw, so the lookups match.
+// A face's own weight, from its OS/2 table (400 if it doesn't say).
+static int faceWeight(const xrender::FontFace* f) noexcept {
+    static std::unordered_map<uint32_t, int> known;
+    if (!f || !f->ft_face_) return 400;
+    if (const auto it = known.find(f->face_id_); it != known.end()) return it->second;
+    int w = (f->ft_face_->style_flags & FT_STYLE_FLAG_BOLD) ? 700 : 400;
+    if (const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(f->ft_face_, FT_SFNT_OS2)); os2 && os2->version != 0xFFFF && os2->usWeightClass > 0)
+        w = os2->usWeightClass;
+    known[f->face_id_] = w;
+    return w;
+}
+
 static xrender::FontFace* faceFor(const fbx::shared::TextData* td) noexcept {
     std::string family(td->font_family_, strnlen(td->font_family_, sizeof(td->font_family_)));
     const int w = td->font_weight_ ? td->font_weight_ : 400;
@@ -400,6 +416,11 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                 std::string text(str, td->string_length_);
 
                 auto* face  = faceFor(td);   // the family / weight / style asked for
+                // Bold asked of a family with no bold face (a page's one webfont): drawn
+                // twice, the second a little to the right, as browsers make it up.
+                const int wanted_weight = td->font_weight_ ? td->font_weight_ : 400;
+                const bool fake_bold = wanted_weight >= 600 && faceWeight(face) < 600;
+                const float bold_shift = std::clamp(td->font_size_ / 24.0f, 0.5f, 2.0f);
                 auto* emoji = xrender::FontManager::getEmojiFace();
                 auto glyphs = (face && text_shaper_)
                     ? text_shaper_->shapeText(text, face->hb_font_, face->face_id_,
@@ -456,6 +477,12 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                     vkCmdPushConstants(command_buffer_, text_pipeline_layout_,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 56, pc);
                     vkCmdDraw(command_buffer_, 4, 1, 0, 0);
+                    if (fake_bold) {
+                        pc[4] = gx + bold_shift;
+                        vkCmdPushConstants(command_buffer_, text_pipeline_layout_,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 56, pc);
+                        vkCmdDraw(command_buffer_, 4, 1, 0, 0);
+                    }
 
                     pen_x += glyph.x_advance_ * scale;
                 }
