@@ -105,9 +105,11 @@ VulkanEngine::~VulkanEngine() {
         if (sampler_) vkDestroySampler(device_, sampler_, nullptr);
         if (image_set_layout_) vkDestroyDescriptorSetLayout(device_, image_set_layout_, nullptr);
 
-        if (atlas_view_) vkDestroyImageView(device_, atlas_view_, nullptr);
-        if (atlas_memory_) vkFreeMemory(device_, atlas_memory_, nullptr);
-        if (atlas_image_) vkDestroyImage(device_, atlas_image_, nullptr);
+        for (const AtlasPage& page : atlas_pages_) {
+            if (page.view) vkDestroyImageView(device_, page.view, nullptr);
+            if (page.memory) vkFreeMemory(device_, page.memory, nullptr);
+            if (page.image) vkDestroyImage(device_, page.image, nullptr);
+        }
 
         for (auto& [key, u] : uploaded_) {
             if (u.view) vkDestroyImageView(device_, u.view, nullptr);
@@ -436,6 +438,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                 vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
                 vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     text_pipeline_layout_, 0, 1, &atlas_descriptor_set_, 0, nullptr);
+                uint32_t bound_page = 0;   // each glyph is drawn from its own page of the atlas
 
                 float pen_x = td->x_;
                 // pen_y is the baseline. The text box is font_size tall, so place
@@ -454,6 +457,15 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                         continue;
                     }
 
+                    if (metric->page_ != bound_page) {
+                        if (metric->page_ >= atlas_pages_.size()) {   // not on the GPU (past the cap)
+                            pen_x += glyph.x_advance_ * scale;
+                            continue;
+                        }
+                        bound_page = metric->page_;
+                        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            text_pipeline_layout_, 0, 1, &atlas_pages_[bound_page].set, 0, nullptr);
+                    }
                     float gx = pen_x + (metric->bearing_x_ + glyph.x_offset_) * scale;
                     float gy = pen_y - (metric->bearing_y_ + glyph.y_offset_) * scale;
                     float gw = metric->width_  * scale;
@@ -618,25 +630,53 @@ uint32_t VulkanEngine::findMemoryType(uint32_t f, VkMemoryPropertyFlags p) const
 uint32_t VulkanEngine::getStride() const noexcept { return window_w_ * 4; }
 
 void VulkanEngine::uploadFontAtlas() {
-    if (!font_atlas_ || font_atlas_->getPageCount() == 0) return;
+    if (!font_atlas_) return;
+    for (uint32_t p = 0; p < font_atlas_->getPageCount(); ++p) uploadAtlasPage(p);
+    if (!atlas_pages_.empty()) {
+        atlas_descriptor_set_ = atlas_pages_[0].set;
+        LOG_INFO("Font atlas uploaded to GPU: {}x{} R8_UNORM", xrender::GlyphCache::kPageSize, xrender::GlyphCache::kPageSize);
+    }
+}
 
+// The atlas grew or a page changed: every page to the GPU again, new pages made. (Only the
+// first page used to be: glyphs that went on a second one were drawn with whatever was at
+// their place on the first — a Korean page full of wrong syllables.)
+void VulkanEngine::reuploadFontAtlas() {
+    if (!font_atlas_ || atlas_pages_.empty()) return;
+    for (uint32_t p = 0; p < font_atlas_->getPageCount(); ++p) uploadAtlasPage(p);
+}
+
+// One page of the atlas: made (image, view, descriptor set) the first time, then its
+// pixels copied in.
+void VulkanEngine::uploadAtlasPage(uint32_t p) {
     constexpr uint32_t aw = xrender::GlyphCache::kPageSize;
     constexpr uint32_t ah = xrender::GlyphCache::kPageSize;
-    const auto& bitmap = font_atlas_->getPageBitmap(0);
-    VkDeviceSize atlas_size = static_cast<VkDeviceSize>(aw) * ah; // R8_UNORM: 1 byte/pixel
-
-    // GPU image (R8_UNORM, device-local)
-    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, 0, 0, VK_IMAGE_TYPE_2D,
-        VK_FORMAT_R8_UNORM, {aw, ah, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT,
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VK_SHARING_MODE_EXCLUSIVE, 0, nullptr, VK_IMAGE_LAYOUT_UNDEFINED};
-    vkCreateImage(device_, &ii, nullptr, &atlas_image_);
-    VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, atlas_image_, &mr);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, mr.size,
-        findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-    vkAllocateMemory(device_, &ai, nullptr, &atlas_memory_);
-    vkBindImageMemory(device_, atlas_image_, atlas_memory_, 0);
+    constexpr uint32_t kMaxPages = 16;   // 4 MB each on the GPU
+    if (p >= kMaxPages) return;
+    const auto& bitmap = font_atlas_->getPageBitmap(p);
+    const VkDeviceSize atlas_size = static_cast<VkDeviceSize>(aw) * ah;   // R8_UNORM: 1 byte/pixel
+    if (bitmap.size() < atlas_size) return;
+    const bool fresh = p >= atlas_pages_.size();
+    if (fresh) {
+        if (p != atlas_pages_.size()) return;   // pages come in order
+        AtlasPage page;
+        VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, 0, 0, VK_IMAGE_TYPE_2D,
+            VK_FORMAT_R8_UNORM, {aw, ah, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT,
+            VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_SHARING_MODE_EXCLUSIVE, 0, nullptr, VK_IMAGE_LAYOUT_UNDEFINED};
+        if (vkCreateImage(device_, &ii, nullptr, &page.image) != VK_SUCCESS) return;
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, page.image, &mr);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, mr.size,
+            findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+        if (vkAllocateMemory(device_, &ai, nullptr, &page.memory) != VK_SUCCESS) {
+            vkDestroyImage(device_, page.image, nullptr);
+            return;
+        }
+        vkBindImageMemory(device_, page.image, page.memory, 0);
+        atlas_pages_.push_back(page);
+    }
+    AtlasPage& page = atlas_pages_[p];
 
     // Staging buffer (host-visible)
     VkBuffer sb; VkDeviceMemory sm;
@@ -652,84 +692,19 @@ void VulkanEngine::uploadFontAtlas() {
     std::memcpy(mapped, bitmap.data(), static_cast<size_t>(atlas_size));
     vkUnmapMemory(device_, sm);
 
-    // Upload
     VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, command_pool_, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     VkCommandBuffer cmd; vkAllocateCommandBuffers(device_, &cbai, &cmd);
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
     vkBeginCommandBuffer(cmd, &cbi);
-
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0,
-        0, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-        atlas_image_, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &barrier);
-
-    VkBufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {aw, ah, 1}};
-    vkCmdCopyBufferToImage(cmd, sb, atlas_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, 0, 0, 0, 1, &barrier);
-
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO, 0, 0, 0, 0, 1, &cmd, 0, 0};
-    vkQueueSubmit(queue_, 1, &si, nullptr); vkQueueWaitIdle(queue_);
-    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
-    vkDestroyBuffer(device_, sb, nullptr); vkFreeMemory(device_, sm, nullptr);
-
-    // Image view — swizzle R into all channels so the shader reads .r correctly
-    VkComponentMapping swizzle{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
-    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0, 0, atlas_image_,
-        VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UNORM, swizzle, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    vkCreateImageView(device_, &vi, nullptr, &atlas_view_);
-
-    // Descriptor set (reuse image_set_layout_ — same binding as text_pipeline_layout_)
-    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, 0, descriptor_pool_, 1, &image_set_layout_};
-    vkAllocateDescriptorSets(device_, &dsai, &atlas_descriptor_set_);
-    VkDescriptorImageInfo dii{sampler_, atlas_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, atlas_descriptor_set_, 0, 0, 1,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii, 0, 0};
-    vkUpdateDescriptorSets(device_, 1, &wds, 0, 0);
-
-    LOG_INFO("Font atlas uploaded to GPU: {}x{} R8_UNORM", aw, ah);
-}
-
-void VulkanEngine::reuploadFontAtlas() {
-    if (!font_atlas_ || atlas_image_ == VK_NULL_HANDLE || font_atlas_->getPageCount() == 0) return;
-
-    constexpr uint32_t aw = xrender::GlyphCache::kPageSize;
-    constexpr uint32_t ah = xrender::GlyphCache::kPageSize;
-    const auto& bitmap = font_atlas_->getPageBitmap(0);
-    VkDeviceSize atlas_size = static_cast<VkDeviceSize>(aw) * ah;
-
-    VkBuffer sb; VkDeviceMemory sm;
-    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, 0, 0, atlas_size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
-    vkCreateBuffer(device_, &bci, nullptr, &sb);
-    VkMemoryRequirements bmr; vkGetBufferMemoryRequirements(device_, sb, &bmr);
-    VkMemoryAllocateInfo sai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, bmr.size,
-        findMemoryType(bmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
-    vkAllocateMemory(device_, &sai, nullptr, &sm);
-    vkBindBufferMemory(device_, sb, sm, 0);
-    void* mapped; vkMapMemory(device_, sm, 0, atlas_size, 0, &mapped);
-    std::memcpy(mapped, bitmap.data(), static_cast<size_t>(atlas_size));
-    vkUnmapMemory(device_, sm);
-
-    VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, 0, command_pool_, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
-    VkCommandBuffer cmd; vkAllocateCommandBuffers(device_, &cbai, &cmd);
-    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 0, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, 0};
-    vkBeginCommandBuffer(cmd, &cbi);
-    // Existing atlas image is in SHADER_READ_ONLY_OPTIMAL — transition to TRANSFER_DST, copy, back.
+    // A new page starts undefined; one that's been sampled is in SHADER_READ_ONLY_OPTIMAL.
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, 0,
-        VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, atlas_image_, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &b);
+        fresh ? VkAccessFlags{0} : VkAccessFlags{VK_ACCESS_SHADER_READ_BIT}, VK_ACCESS_TRANSFER_WRITE_BIT,
+        fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, page.image, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(cmd, fresh ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &b);
     VkBufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {aw, ah, 1}};
-    vkCmdCopyBufferToImage(cmd, sb, atlas_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, sb, page.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, 0, 0, 0, 1, &b);
@@ -738,6 +713,21 @@ void VulkanEngine::reuploadFontAtlas() {
     vkQueueSubmit(queue_, 1, &si, nullptr); vkQueueWaitIdle(queue_);
     vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
     vkDestroyBuffer(device_, sb, nullptr); vkFreeMemory(device_, sm, nullptr);
+
+    if (fresh) {
+        // Image view — swizzle R into all channels so the shader reads .r correctly
+        VkComponentMapping swizzle{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 0, 0, page.image,
+            VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UNORM, swizzle, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        vkCreateImageView(device_, &vi, nullptr, &page.view);
+        // Descriptor set (reuse image_set_layout_ — same binding as text_pipeline_layout_)
+        VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, 0, descriptor_pool_, 1, &image_set_layout_};
+        vkAllocateDescriptorSets(device_, &dsai, &page.set);
+        VkDescriptorImageInfo dii{sampler_, page.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, page.set, 0, 0, 1,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii, 0, 0};
+        vkUpdateDescriptorSets(device_, 1, &wds, 0, 0);
+    }
 }
 
 bool VulkanEngine::initVulkan(int, int) { return true; }

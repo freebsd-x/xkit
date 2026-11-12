@@ -124,11 +124,15 @@ private:
     VkSampler sampler_{VK_NULL_HANDLE};
     VkDescriptorPool descriptor_pool_{VK_NULL_HANDLE};
 
-    // Font Atlas Vulkan Resources
-    VkImage atlas_image_{VK_NULL_HANDLE};
-    VkDeviceMemory atlas_memory_{VK_NULL_HANDLE};
-    VkImageView atlas_view_{VK_NULL_HANDLE};
-    VkDescriptorSet atlas_descriptor_set_{VK_NULL_HANDLE};
+    // Font Atlas Vulkan Resources: a texture per page of the glyph atlas.
+    struct AtlasPage {
+        VkImage image{VK_NULL_HANDLE};
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        VkImageView view{VK_NULL_HANDLE};
+        VkDescriptorSet set{VK_NULL_HANDLE};
+    };
+    std::vector<AtlasPage> atlas_pages_;
+    VkDescriptorSet atlas_descriptor_set_{VK_NULL_HANDLE};   // the first page's: set once text can be drawn
 
     // Uploaded DrawImage textures, by ImageData::texture_id_ (content identity;
     // the pixel address only when no id is given). An image not drawn in a
@@ -149,9 +153,11 @@ private:
 
     bool initVulkan(int w, int h);
     void uploadFontAtlas();
-    // Re-copy the (grown) CPU atlas page into the existing GPU atlas image.
+    // Re-copy the (grown) CPU atlas pages to the GPU, making textures for new pages.
     // Called when new glyphs were added mid-session (font_atlas_->isDirty()).
     void reuploadFontAtlas();
+    // One page: its texture made the first time, then its pixels copied in.
+    void uploadAtlasPage(uint32_t page);
     VkDescriptorSet getOrCreateImageDescriptor(uint64_t key, const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t size);
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
 
