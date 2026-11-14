@@ -304,8 +304,6 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     uint32_t w = window_w_, h = window_h_;
     // Draw into the buffer the compositor is NOT currently sampling.
     const int buf_idx = current_buffer_;
-    vkWaitForFences(device_, 1, &render_fence_, VK_TRUE, UINT64_MAX); vkResetFences(device_, 1, &render_fence_);
-    evictUnusedImages();   // the last frame's GPU work is done: safe to free what it didn't use
     // What is behind this window's own painting, for readable unstyled text:
     // the clear colour below, or for the transparent shell the (blue) desktop
     // wallpaper. Matches the layout audit's contrast check.
@@ -314,6 +312,27 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     RenderNode::paintBackdrop() = transparent_clear_ ? Color{0.06f, 0.16f, 0.38f, 1.0f}
                                                      : ThemeManager::getInstance().windowBackground();
     fbx::xrender::DisplayList dl; root->paint(dl, {0,0});
+
+    // The same drawing as the frame before, at the same size: that frame stands. No GPU
+    // work and no new buffer for the compositor (an app at rest used to render and send
+    // every frame anyway). Any difference at all draws as before.
+    {
+        const auto cmds = dl.getCommands();
+        const auto data = dl.getDataBuffer();
+        const size_t cmd_bytes = cmds.size() * sizeof(cmds[0]);
+        const bool same = have_last_frame_ && w == last_frame_w_ && h == last_frame_h_ && cmd_bytes == last_frame_cmds_.size() &&
+                          data.size() == last_frame_data_.size() &&
+                          std::memcmp(cmds.data(), last_frame_cmds_.data(), cmd_bytes) == 0 &&
+                          std::memcmp(data.data(), last_frame_data_.data(), data.size()) == 0;
+        if (same) return RenderResult(-1);
+        last_frame_cmds_.assign(reinterpret_cast<const uint8_t*>(cmds.data()), reinterpret_cast<const uint8_t*>(cmds.data()) + cmd_bytes);
+        last_frame_data_.assign(data.begin(), data.end());
+        last_frame_w_ = w;
+        last_frame_h_ = h;
+        have_last_frame_ = true;
+    }
+    vkWaitForFences(device_, 1, &render_fence_, VK_TRUE, UINT64_MAX); vkResetFences(device_, 1, &render_fence_);
+    evictUnusedImages();   // the last frame's GPU work is done: safe to free what it didn't use
 
     // Ensure every glyph this frame's text needs is present in the atlas, then
     // re-upload the atlas texture if it grew. The atlas is sampled inside the
@@ -327,8 +346,10 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
             const auto* td = reinterpret_cast<const fbx::shared::TextData*>(
                 dl.getDataBuffer().data() + cmd.data_offset_);
             const char* str = reinterpret_cast<const char*>(td + 1);
-            xrender::FontManager::ensureGlyphs(std::string(str, td->string_length_),
-                                               faceFor(td), *font_atlas_);
+            const std::string text(str, td->string_length_);
+            // Shaped before: its glyphs went into the atlas then (which keeps them).
+            if (shapedRunCached(faceFor(td), text)) continue;
+            xrender::FontManager::ensureGlyphs(text, faceFor(td), *font_atlas_);
         }
         if (font_atlas_->isDirty()) {
             reuploadFontAtlas();
@@ -423,12 +444,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                 const int wanted_weight = td->font_weight_ ? td->font_weight_ : 400;
                 const bool fake_bold = wanted_weight >= 600 && faceWeight(face) < 600;
                 const float bold_shift = std::clamp(td->font_size_ / 24.0f, 0.5f, 2.0f);
-                auto* emoji = xrender::FontManager::getEmojiFace();
-                auto glyphs = (face && text_shaper_)
-                    ? text_shaper_->shapeText(text, face->hb_font_, face->face_id_,
-                                              emoji ? emoji->hb_font_ : nullptr,
-                                              emoji ? emoji->face_id_ : 0)
-                    : std::vector<xrender::ShapedGlyph>{};
+                const std::vector<xrender::ShapedGlyph>& glyphs = shapedRun(face, text);
 
                 // Atlas was built at 48px; scale to requested font_size_
                 float scale = td->font_size_ / 48.0f;
@@ -628,6 +644,42 @@ uint32_t VulkanEngine::findMemoryType(uint32_t f, VkMemoryPropertyFlags p) const
 }
 
 uint32_t VulkanEngine::getStride() const noexcept { return window_w_ * 4; }
+
+// Text shaped once, not every frame: a run's glyphs by its face and text (the emoji face
+// is the same for every run). Most of a frame's text is the frame before's; shaping all of
+// it again each frame was a large part of what an app spent drawing (a web page's text).
+std::string VulkanEngine::shapedRunKey(const xrender::FontFace* face, const std::string& text) const {
+    std::string key;
+    const uint32_t id = face ? face->face_id_ : 0;
+    key.append(reinterpret_cast<const char*>(&id), sizeof id);
+    key += text;
+    return key;
+}
+
+bool VulkanEngine::shapedRunCached(const xrender::FontFace* face, const std::string& text) const {
+    return shaped_runs_.count(shapedRunKey(face, text)) != 0;
+}
+
+const std::vector<xrender::ShapedGlyph>& VulkanEngine::shapedRun(const xrender::FontFace* face, const std::string& text) {
+    static const std::vector<xrender::ShapedGlyph> kNone;
+    if (!face || !text_shaper_) return kNone;
+    std::string key = shapedRunKey(face, text);
+    if (auto it = shaped_runs_.find(key); it != shaped_runs_.end()) {
+        it->second.last_frame = frame_no_;
+        return it->second.glyphs;
+    }
+    // Now and then, the runs no frame has drawn for a while go.
+    if (shaped_runs_.size() > 20000) {
+        for (auto it = shaped_runs_.begin(); it != shaped_runs_.end();)
+            it = it->second.last_frame + 300 < frame_no_ ? shaped_runs_.erase(it) : std::next(it);
+        if (shaped_runs_.size() > 20000) shaped_runs_.clear();
+    }
+    auto* emoji = xrender::FontManager::getEmojiFace();
+    ShapedRun run;
+    run.glyphs = text_shaper_->shapeText(text, face->hb_font_, face->face_id_, emoji ? emoji->hb_font_ : nullptr, emoji ? emoji->face_id_ : 0);
+    run.last_frame = frame_no_;
+    return shaped_runs_.emplace(std::move(key), std::move(run)).first->second.glyphs;
+}
 
 void VulkanEngine::uploadFontAtlas() {
     if (!font_atlas_) return;

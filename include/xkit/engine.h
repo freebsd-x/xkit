@@ -5,11 +5,14 @@
 #include "xkit/render_node.h"
 #include "xserver/unique_fd.h"
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 #include <gbm.h>
 #include <vulkan/vulkan.h>
 #include "xrender/font_atlas.h"
+#include "xrender/font_manager.h"
 #include "xrender/text_shaper.h"
 
 namespace fbx::xkit {
@@ -148,6 +151,19 @@ private:
     };
     std::unordered_map<uint64_t, UploadedImage> uploaded_;
     uint64_t frame_no_{0};
+    // The last frame drawn, as its display list's bytes: an identical one isn't drawn again.
+    std::vector<uint8_t> last_frame_cmds_, last_frame_data_;
+    uint32_t last_frame_w_ = 0, last_frame_h_ = 0;
+    bool have_last_frame_ = false;
+    // Shaped text runs, kept across frames (see shapedRun).
+    struct ShapedRun {
+        std::vector<xrender::ShapedGlyph> glyphs;
+        uint64_t last_frame = 0;
+    };
+    std::unordered_map<std::string, ShapedRun> shaped_runs_;
+    std::string shapedRunKey(const xrender::FontFace* face, const std::string& text) const;
+    bool shapedRunCached(const xrender::FontFace* face, const std::string& text) const;
+    const std::vector<xrender::ShapedGlyph>& shapedRun(const xrender::FontFace* face, const std::string& text);
     void releaseImage(UploadedImage& u) noexcept;
     void evictUnusedImages() noexcept;
 
