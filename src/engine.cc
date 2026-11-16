@@ -1,5 +1,6 @@
 #include "xkit/engine.h"
 #include <unordered_map>
+#include <algorithm>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
@@ -341,6 +342,10 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
     // invisibly. The atlas stabilises after the first few frames (static UI
     // text), so re-uploads stop once every glyph has been seen once.
     if (font_atlas_ && text_shaper_) {
+        // The new runs, a face's together (a space between, so nothing's shaped across
+        // two): the glyphs a frame of new text needs are then made in one go, their
+        // distance fields side by side (a page of Korean is hundreds at once).
+        std::vector<std::pair<xrender::FontFace*, std::string>> fresh;
         for (const auto& cmd : dl.getCommands()) {
             if (cmd.type_ != fbx::shared::CommandType::DrawText) continue;
             const auto* td = reinterpret_cast<const fbx::shared::TextData*>(
@@ -348,9 +353,14 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
             const char* str = reinterpret_cast<const char*>(td + 1);
             const std::string text(str, td->string_length_);
             // Shaped before: its glyphs went into the atlas then (which keeps them).
-            if (shapedRunCached(faceFor(td), text)) continue;
-            xrender::FontManager::ensureGlyphs(text, faceFor(td), *font_atlas_);
+            xrender::FontFace* face = faceFor(td);
+            if (shapedRunCached(face, text)) continue;
+            auto it = std::find_if(fresh.begin(), fresh.end(), [&](const auto& f) { return f.first == face; });
+            if (it == fresh.end()) it = fresh.insert(fresh.end(), {face, std::string{}});
+            it->second += text;
+            it->second += ' ';
         }
+        for (const auto& [face, text] : fresh) xrender::FontManager::ensureGlyphs(text, face, *font_atlas_);
         if (font_atlas_->isDirty()) {
             reuploadFontAtlas();
             font_atlas_->clearDirty();
