@@ -148,7 +148,13 @@ private:
         VkDeviceMemory  memory{VK_NULL_HANDLE};
         VkImageView     view{VK_NULL_HANDLE};
         uint64_t        last_frame{0};
+        uint64_t        bytes{0};
     };
+    uint64_t kept_bytes_{0};
+    VkBuffer staging_buffer_{VK_NULL_HANDLE};
+    VkDeviceMemory staging_memory_{VK_NULL_HANDLE};
+    void* staging_map_{nullptr};
+    uint64_t staging_size_{0};   // what images with an id of their own hold (see evictUnusedImages)
     std::unordered_map<uint64_t, UploadedImage> uploaded_;
     uint64_t frame_no_{0};
     // The last frame drawn, as its display list's bytes: an identical one isn't drawn again.

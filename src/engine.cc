@@ -112,6 +112,7 @@ VulkanEngine::~VulkanEngine() {
             if (page.image) vkDestroyImage(device_, page.image, nullptr);
         }
 
+        if (staging_buffer_) { vkDestroyBuffer(device_, staging_buffer_, nullptr); vkFreeMemory(device_, staging_memory_, nullptr); }
         for (auto& [key, u] : uploaded_) {
             if (u.view) vkDestroyImageView(device_, u.view, nullptr);
             if (u.image) vkDestroyImage(device_, u.image, nullptr);
@@ -191,10 +192,14 @@ bool VulkanEngine::init(int w, int h) {
     VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 1, &b};
     vkCreateDescriptorSetLayout(device_, &lci, nullptr, &image_set_layout_);
-    // Freeable sets: image textures come and go (evictUnusedImages).
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256};
+    // Freeable sets: image textures come and go (evictUnusedImages). A news page draws
+    // hundreds at once (thumbnails, icons, boxes drawn on the CPU): with room for 256,
+    // daum.net's frames ran out, uploaded what didn't fit, couldn't draw it, and did the
+    // same again the next frame.
+    constexpr uint32_t kImageSets = 4096;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kImageSets};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr,
-                                    VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 256, 1, &ps};
+                                    VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, kImageSets, 1, &ps};
     vkCreateDescriptorPool(device_, &dpci, nullptr, &descriptor_pool_);
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, nullptr, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0, VK_FALSE, 0, VK_FALSE, VK_COMPARE_OP_NEVER, 0, 0, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE};
     vkCreateSampler(device_, &si, nullptr, &sampler_);
@@ -592,9 +597,41 @@ void VulkanEngine::releaseImage(UploadedImage& u) noexcept {
 }
 
 void VulkanEngine::evictUnusedImages() noexcept {
+    // An image known by its pointer goes once a frame hasn't drawn it: the pointer may
+    // be another image's next. One with an id of its own (a texture_id: never reused) is
+    // kept a while: scrolled out and back, it was uploaded again each time (a quarter
+    // of a scroll's frame) -- within a budget, the least recently drawn going first.
+    constexpr uint64_t kKeepFrames = 240;
+    constexpr uint64_t kKeptBudget = 256ull << 20;
+    const auto own_id = [](uint64_t key) { return (key >> 63) != 0; };
     for (auto it = uploaded_.begin(); it != uploaded_.end();) {
-        if (it->second.last_frame < frame_no_) { releaseImage(it->second); it = uploaded_.erase(it); }
-        else ++it;
+        const UploadedImage& u = it->second;
+        const bool stale = own_id(it->first) ? u.last_frame + kKeepFrames < frame_no_ : u.last_frame < frame_no_;
+        if (stale) {
+            if (own_id(it->first)) kept_bytes_ -= std::min(kept_bytes_, u.bytes);
+            releaseImage(it->second);
+            it = uploaded_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // The descriptor pool has room for 4096 images: what's kept leaves room for a frame's.
+    constexpr size_t kKeptMax = 2048;
+    const auto kept_count = [&] {
+        size_t n = 0;
+        for (const auto& [key, u] : uploaded_) n += own_id(key) && u.last_frame < frame_no_;
+        return n;
+    };
+    size_t kept = kept_count();
+    while (kept_bytes_ > kKeptBudget || kept > kKeptMax) {
+        auto oldest = uploaded_.end();
+        for (auto it = uploaded_.begin(); it != uploaded_.end(); ++it)
+            if (own_id(it->first) && it->second.last_frame < frame_no_ && (oldest == uploaded_.end() || it->second.last_frame < oldest->second.last_frame)) oldest = it;
+        if (oldest == uploaded_.end()) break;
+        kept_bytes_ -= std::min(kept_bytes_, oldest->second.bytes);
+        releaseImage(oldest->second);
+        uploaded_.erase(oldest);
+        --kept;
     }
     ++frame_no_;
 }
@@ -610,11 +647,19 @@ VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(uint64_t key, const uin
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, img, &mr);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size, findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
     VkDeviceMemory mem; vkAllocateMemory(device_, &ai, 0, &mem); vkBindImageMemory(device_, img, mem, 0);
-    VkBuffer sb; VkDeviceMemory sm; VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,0,0,size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_SHARING_MODE_EXCLUSIVE,0,0};
-    vkCreateBuffer(device_, &bci, 0, &sb); vkGetBufferMemoryRequirements(device_, sb, &mr);
-    VkMemoryAllocateInfo sai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size,findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
-    vkAllocateMemory(device_, &sai, 0, &sm); vkBindBufferMemory(device_, sb, sm, 0);
-    void* data; vkMapMemory(device_, sm, 0, size, 0, &data); std::memcpy(data, pixels, size); vkUnmapMemory(device_, sm);
+    // One staging buffer, kept and grown: an animation's canvas is a new image each
+    // frame, and making and freeing a buffer for each was much of what it cost.
+    if (staging_size_ < size) {
+        if (staging_buffer_) { vkDestroyBuffer(device_, staging_buffer_, 0); vkFreeMemory(device_, staging_memory_, 0); }
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,0,0,size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_SHARING_MODE_EXCLUSIVE,0,0};
+        vkCreateBuffer(device_, &bci, 0, &staging_buffer_); vkGetBufferMemoryRequirements(device_, staging_buffer_, &mr);
+        VkMemoryAllocateInfo sai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size,findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+        vkAllocateMemory(device_, &sai, 0, &staging_memory_); vkBindBufferMemory(device_, staging_buffer_, staging_memory_, 0);
+        vkMapMemory(device_, staging_memory_, 0, VK_WHOLE_SIZE, 0, &staging_map_);
+        staging_size_ = size;
+    }
+    const VkBuffer sb = staging_buffer_;
+    std::memcpy(staging_map_, pixels, size);
     VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,0,command_pool_,VK_COMMAND_BUFFER_LEVEL_PRIMARY,1};
     VkCommandBuffer cmd; vkAllocateCommandBuffers(device_, &cbai, &cmd);
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,0,VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,0};
@@ -629,21 +674,22 @@ VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(uint64_t key, const uin
     vkEndCommandBuffer(cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO,0,0,0,0,1,&cmd,0,0};
     vkQueueSubmit(queue_, 1, &si, 0); vkQueueWaitIdle(queue_);
-    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd); vkDestroyBuffer(device_, sb, 0); vkFreeMemory(device_, sm, 0);
+    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
     VkComponentMapping ident = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
     VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,0,0,img,VK_IMAGE_VIEW_TYPE_2D,ii.format,ident,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
     VkImageView view; vkCreateImageView(device_, &vi, 0, &view);
     VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,0,descriptor_pool_,1,&image_set_layout_};
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (vkAllocateDescriptorSets(device_, &dsai, &set) != VK_SUCCESS) {
-        // Pool exhausted (more than 255 distinct images in one frame): skip it.
+        // Pool exhausted (more than 4096 distinct images at once): skip it.
         vkDestroyImageView(device_, view, nullptr); vkDestroyImage(device_, img, nullptr); vkFreeMemory(device_, mem, nullptr);
         return VK_NULL_HANDLE;
     }
     VkDescriptorImageInfo dii{sampler_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,set,0,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,&dii,0,0};
     vkUpdateDescriptorSets(device_, 1, &wds, 0, 0);
-    uploaded_[key] = {set, img, mem, view, frame_no_};
+    uploaded_[key] = {set, img, mem, view, frame_no_, size};
+    if (key >> 63) kept_bytes_ += size;
     return set;
 }
 
