@@ -643,19 +643,54 @@ VkDescriptorSet VulkanEngine::getOrCreateImageDescriptor(uint64_t key, const uin
     }
     if (!pixels || w == 0 || h == 0) return VK_NULL_HANDLE;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,0,0,VK_IMAGE_TYPE_2D, (size == w*h ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM), {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED};
-    VkImage img; vkCreateImage(device_, &ii, 0, &img);
+    VkImage img = VK_NULL_HANDLE;
+    if (vkCreateImage(device_, &ii, 0, &img) != VK_SUCCESS) return VK_NULL_HANDLE;
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(device_, img, &mr);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size, findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
-    VkDeviceMemory mem; vkAllocateMemory(device_, &ai, 0, &mem); vkBindImageMemory(device_, img, mem, 0);
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (vkAllocateMemory(device_, &ai, 0, &mem) != VK_SUCCESS) {
+        LOG_WARN("image upload: no memory for a {}x{} image", w, h);
+        vkDestroyImage(device_, img, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    vkBindImageMemory(device_, img, mem, 0);
     // One staging buffer, kept and grown: an animation's canvas is a new image each
     // frame, and making and freeing a buffer for each was much of what it cost.
-    if (staging_size_ < size) {
-        if (staging_buffer_) { vkDestroyBuffer(device_, staging_buffer_, 0); vkFreeMemory(device_, staging_memory_, 0); }
+    // Every step checked: a grow that failed used to leave staging_map_ pointing into
+    // the memory just freed, and the next image's pixels were copied over whatever the
+    // allocator had given it to since (the page's script heap: tistory.com's crashes).
+    if (staging_size_ < size || !staging_map_) {
+        if (staging_buffer_) {
+            if (staging_map_) vkUnmapMemory(device_, staging_memory_);
+            vkDestroyBuffer(device_, staging_buffer_, 0);
+            vkFreeMemory(device_, staging_memory_, 0);
+        }
+        staging_buffer_ = VK_NULL_HANDLE;
+        staging_memory_ = VK_NULL_HANDLE;
+        staging_map_ = nullptr;
+        staging_size_ = 0;
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,0,0,size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_SHARING_MODE_EXCLUSIVE,0,0};
-        vkCreateBuffer(device_, &bci, 0, &staging_buffer_); vkGetBufferMemoryRequirements(device_, staging_buffer_, &mr);
-        VkMemoryAllocateInfo sai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,mr.size,findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
-        vkAllocateMemory(device_, &sai, 0, &staging_memory_); vkBindBufferMemory(device_, staging_buffer_, staging_memory_, 0);
-        vkMapMemory(device_, staging_memory_, 0, VK_WHOLE_SIZE, 0, &staging_map_);
+        VkBuffer buf = VK_NULL_HANDLE;
+        VkDeviceMemory smem = VK_NULL_HANDLE;
+        void* map = nullptr;
+        bool ok = vkCreateBuffer(device_, &bci, 0, &buf) == VK_SUCCESS;
+        if (ok) {
+            VkMemoryRequirements smr; vkGetBufferMemoryRequirements(device_, buf, &smr);
+            VkMemoryAllocateInfo sai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,0,smr.size,findMemoryType(smr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+            ok = vkAllocateMemory(device_, &sai, 0, &smem) == VK_SUCCESS && vkBindBufferMemory(device_, buf, smem, 0) == VK_SUCCESS &&
+                 vkMapMemory(device_, smem, 0, VK_WHOLE_SIZE, 0, &map) == VK_SUCCESS && map;
+        }
+        if (!ok) {
+            LOG_WARN("image upload: no staging buffer for {} bytes ({}x{})", size, w, h);
+            if (smem) vkFreeMemory(device_, smem, nullptr);
+            if (buf) vkDestroyBuffer(device_, buf, nullptr);
+            vkDestroyImage(device_, img, nullptr);
+            vkFreeMemory(device_, mem, nullptr);
+            return VK_NULL_HANDLE;
+        }
+        staging_buffer_ = buf;
+        staging_memory_ = smem;
+        staging_map_ = map;
         staging_size_ = size;
     }
     const VkBuffer sb = staging_buffer_;

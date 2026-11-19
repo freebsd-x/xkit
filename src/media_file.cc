@@ -149,11 +149,16 @@ bool decodeImageFd(int fd, const std::string& name, std::vector<uint8_t>& rgba, 
                                      static_cast<int>(width), static_cast<int>(height), AV_PIX_FMT_RGBA,
                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws) { error = "unsupported pixel format"; return false; }
-    rgba.assign(static_cast<size_t>(width) * height * 4, 0);
+    // Room past the image: swscale's vector loops may write beyond a line's end, and
+    // its last line's overrun went into whatever the heap had next (a page's script
+    // values, overwritten by a row of a 34-pixel avatar: tistory.com's crashes).
+    const size_t image_bytes = static_cast<size_t>(width) * height * 4;
+    rgba.assign(image_bytes + static_cast<size_t>(width) * 4 * 2 + 256, 0);
     uint8_t* dst[4] = {rgba.data(), nullptr, nullptr, nullptr};
     int dst_stride[4] = {static_cast<int>(width * 4), 0, 0, 0};
     const int rows = sws_scale(sws, done.frame->data, done.frame->linesize, 0, static_cast<int>(src_h), dst, dst_stride);
     sws_freeContext(sws);
+    rgba.resize(image_bytes);
     if (rows <= 0) { error = "unsupported pixel format"; return false; }
     return true;
 }
