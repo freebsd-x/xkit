@@ -429,7 +429,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
                 // Push constants must match ui_image.vert's std430 layout exactly:
                 //   pos(2) size(2) screen_size(2) uv0(2) uv1(2) — two vec2 UV pairs,
                 //   NOT a vec4 (which std430 would pad to a 16-byte boundary).
-                float pc[12] = { id->x_, id->y_, id->width_, id->height_, (float)w, (float)h, id->uv_x0_, id->uv_y0_, id->uv_x1_, id->uv_y1_, 0.0f, 0.0f };
+                float pc[12] = { id->x_, id->y_, id->width_, id->height_, (float)w, (float)h, id->uv_x0_, id->uv_y0_, id->uv_x1_, id->uv_y1_, std::clamp(id->opacity_, 0.0f, 1.0f), 0.0f };
                 vkCmdPushConstants(command_buffer_, image_pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
                 vkCmdDraw(command_buffer_, 4, 1, 0, 0);
             }
