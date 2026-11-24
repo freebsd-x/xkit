@@ -582,9 +582,11 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
 
     // App id is pid-derived; keep it nonzero (0 is reserved/invalid — the
     // compositor drops surface 0, since a zero id also results from a misframed
-    // message). pid & 0xFFFF is 0 only for pids that are multiples of 65536.
-    uint32_t app_id = static_cast<uint32_t>(getpid()) & 0xFFFF;
-    if (app_id == 0) app_id = 1;
+    // message) and clear of the lock screen's and the shell's, 998 and 999, which it
+    // refuses anyone else: an app that happened to get that pid crashed on starting.
+    // The whole pid: cut to 16 bits, pids above 65535 met others' ids.
+    uint32_t app_id = static_cast<uint32_t>(getpid());
+    if (app_id == 998 || app_id == 999) app_id += 0x100000;   // (above any pid)
     uint32_t my_surface_id = is_shell ? shell_surface_id : app_id;
     g_surface_id = my_surface_id;
     int window_w = 800, window_h = 600;
@@ -628,6 +630,12 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
                     window_h = static_cast<int>(res->height_);
                     g_window_w = window_w;
                     g_window_h = window_h;
+                    // No size: refused (a reserved or taken id, too many surfaces, a shell
+                    // surface from something that isn't the shell).
+                    if (window_w <= 0 || window_h <= 0) {
+                        LOG_ERROR("The display server refused the surface.");
+                        return 1;
+                    }
                     LOG_INFO("SurfaceReady Handshake Complete! Screen: {}x{}", window_w, window_h);
                     ready = true;
                     break;
