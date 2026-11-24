@@ -18,6 +18,7 @@
 #include <csignal>
 #include <set>
 #include <chrono>
+#include <optional>
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -154,6 +155,14 @@ static void moveFocusFrom(const RenderNode& root, bool forward);   // keyboard f
 static void focusElement(const std::shared_ptr<Element>& el);
 
 void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = std::move(cb); }
+
+static std::function<bool()> g_draw_needed;
+static std::optional<std::chrono::steady_clock::time_point> g_wake_at;
+void XApplication::setDrawNeeded(std::function<bool()> cb) noexcept { g_draw_needed = std::move(cb); }
+void XApplication::wakeIn(double ms) noexcept {
+    const auto at = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<int64_t>(std::clamp(ms, 0.0, 60000.0) * 1000));
+    if (!g_wake_at || at < *g_wake_at) g_wake_at = at;
+}
 
 static std::atomic<std::thread::id> g_ui_thread{};
 static std::atomic<int> g_window_w{0}, g_window_h{0};
@@ -854,14 +863,17 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
     int  locale_retry_frames = 0;
     int  locale_retries_left = 16;
 
+    auto last_draw = std::chrono::steady_clock::now();
+    bool drew = true;   // the last pass laid out and drew
+
     // --- Main Application Loop ---
     while (true) {
-        if (!*theme_applied && theme_retries_left > 0 && ++theme_retry_frames >= 6) {
+        if (drew && !*theme_applied && theme_retries_left > 0 && ++theme_retry_frames >= 6) {
             theme_retry_frames = 0;
             --theme_retries_left;
             query_theme();
         }
-        if (!*locale_applied && locale_retries_left > 0 && ++locale_retry_frames >= 6) {
+        if (drew && !*locale_applied && locale_retries_left > 0 && ++locale_retry_frames >= 6) {
             locale_retry_frames = 0;
             --locale_retries_left;
             query_locale();
@@ -872,13 +884,22 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         // is active, and otherwise idles at ~10 FPS — so a static desktop no
         // longer re-renders and re-sends a full FrameReady 60x/second for no
         // visual change.
+        bool only_woken = false;   // nothing but wakeIn's time having come
         {
             int timeout_ms = ticker.hasActiveAnimations() ? kActiveFrameMs : kIdleFrameMs;
+            if (g_wake_at) {
+                const auto left = std::chrono::duration_cast<std::chrono::microseconds>(*g_wake_at - std::chrono::steady_clock::now()).count();
+                timeout_ms = static_cast<int>(std::min<int64_t>(timeout_ms, std::max<int64_t>(0, (left + 999) / 1000)));
+            }
             bool posted_pending;
             { std::lock_guard<std::mutex> lk(g_post_mu); posted_pending = !g_posted.empty(); }
             if (posted_pending) timeout_ms = 0;
             struct pollfd pfd[2] = {{shared_socket->fd(), POLLIN, 0}, {g_wake_pipe[0], POLLIN, 0}};
             (void)::poll(pfd, g_wake_pipe[0] >= 0 ? 2 : 1, timeout_ms);
+            const bool due = g_wake_at && std::chrono::steady_clock::now() >= *g_wake_at;
+            if (due) g_wake_at.reset();
+            only_woken = due && !posted_pending && !(pfd[0].revents & POLLIN) && !ticker.hasActiveAnimations() &&
+                         !(g_wake_pipe[0] >= 0 && (pfd[1].revents & POLLIN));
             if (g_wake_pipe[0] >= 0 && (pfd[1].revents & POLLIN)) {
                 char buf[64];
                 while (::read(g_wake_pipe[0], buf, sizeof(buf)) > 0) {}
@@ -1110,6 +1131,13 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
             for (auto& fn : posted) if (fn) fn();
         }
         if (g_frame_cb) g_frame_cb();   // before this frame's sync and layout
+        if (only_woken && g_draw_needed && !g_draw_needed() &&
+            std::chrono::steady_clock::now() - last_draw < std::chrono::milliseconds(kIdleFrameMs)) {
+            drew = false;
+            continue;
+        }
+        drew = true;
+        last_draw = std::chrono::steady_clock::now();
         Constraints c{0, (float)window_w, 0, (float)window_h};
         auto root_node = root_element->getRenderNode();
         g_root_node = root_node;

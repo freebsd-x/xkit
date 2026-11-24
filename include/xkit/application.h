@@ -75,6 +75,12 @@ public:
 
     // Called once per frame, before the widget tree is synced and laid out.
     static void setOnFrame(std::function<void()> cb) noexcept;
+    // The next frame's callback in this long, at most (it's 100 ms when nothing moves):
+    // for work that's due then. One frame's asking; asked again as needed. UI thread.
+    static void wakeIn(double ms) noexcept;
+    // Asked after that callback when the frame came of wakeIn alone: false if there's
+    // nothing new to lay out and draw, or it's too soon to (then neither's done).
+    static void setDrawNeeded(std::function<bool()> cb) noexcept;
 
     // Run `fn` on the UI thread (at the start of the next frame). Widgets are
     // not thread-safe: a background thread (a download, a search) must hand
