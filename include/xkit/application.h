@@ -78,6 +78,14 @@ public:
     // The next frame's callback in this long, at most (it's 100 ms when nothing moves):
     // for work that's due then. One frame's asking; asked again as needed. UI thread.
     static void wakeIn(double ms) noexcept;
+    // A frame laid out and drawn, at the next one's time: something is moving.
+    static void requestFrame() noexcept;
+    // Called now and then by what takes long on the UI thread (a page's script): wheel
+    // events come since scroll what they're over, and it's drawn as it was last laid out.
+    // Nothing else is done; other messages wait their turn.
+    static void breathe() noexcept;
+    // Scroll views being scrolled step here (in breathe): false when it's come to rest.
+    static void addScroller(std::function<bool()> step) noexcept;
     // Asked after that callback when the frame came of wakeIn alone: false if there's
     // nothing new to lay out and draw, or it's too soon to (then neither's done).
     static void setDrawNeeded(std::function<bool()> cb) noexcept;

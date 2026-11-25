@@ -28,6 +28,8 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
+#include <utility>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -159,6 +161,25 @@ void XApplication::setOnFrame(std::function<void()> cb) noexcept { g_frame_cb = 
 static std::function<bool()> g_draw_needed;
 static std::optional<std::chrono::steady_clock::time_point> g_wake_at;
 void XApplication::setDrawNeeded(std::function<bool()> cb) noexcept { g_draw_needed = std::move(cb); }
+static bool g_frame_wanted = false;           // the next pass draws, whatever it came of
+static std::function<void()> g_breathe;       // see breathe
+static bool g_breathing = false;
+static std::vector<std::function<bool()>> g_scrollers;
+
+void XApplication::requestFrame() noexcept {
+    g_frame_wanted = true;
+    wakeIn(16);
+}
+
+void XApplication::breathe() noexcept {
+    if (!g_breathe || g_breathing) return;
+    g_breathing = true;
+    g_breathe();
+    g_breathing = false;
+}
+
+void XApplication::addScroller(std::function<bool()> step) noexcept { g_scrollers.push_back(std::move(step)); }
+
 void XApplication::wakeIn(double ms) noexcept {
     const auto at = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<int64_t>(std::clamp(ms, 0.0, 60000.0) * 1000));
     if (!g_wake_at || at < *g_wake_at) g_wake_at = at;
@@ -866,6 +887,73 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
     auto last_draw = std::chrono::steady_clock::now();
     bool drew = true;   // the last pass laid out and drew
 
+    // Render and export a frame.
+    const auto present = [&](const std::shared_ptr<RenderNode>& root_node) {
+        auto frame = renderer.paint(root_node);
+        auto dmabuf_fd = frame.exportDmabuf();
+
+        if (dmabuf_fd.isValid()) {
+            shared::RenderMessage frame_msg{
+                .surface_id_ = my_surface_id,
+                .status_ = shared::RenderMessageStatus::FrameReady,
+                .width_ = (uint32_t)window_w,
+                .height_ = (uint32_t)window_h,
+                .damage_x_ = frame.damage_x_,
+                .damage_y_ = frame.damage_y_,
+                .damage_width_ = frame.damage_width_,
+                .damage_height_ = frame.damage_height_,
+                .buffer_index_ = frame.buffer_index_
+            };
+            std::span<const uint8_t> payload(reinterpret_cast<const uint8_t*>(&frame_msg), sizeof(frame_msg));
+            auto send_res = shared_socket->sendMessage(payload, dmabuf_fd.get());
+            if (!send_res) {
+                LOG_ERROR("Failed to send FrameReady: {}", send_res.error().message());
+            }
+        }
+
+    };
+    // Messages read while breathing, for the loop to take first.
+    std::deque<decltype(shared_socket->receiveMessage())> held;
+    auto last_breath = std::chrono::steady_clock::now();
+    g_breathe = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        const auto root = g_root_node.lock();
+        if (now - last_breath < std::chrono::milliseconds(kActiveFrameMs) || !root) return;
+        last_breath = now;
+        while (held.size() < 4096) {
+            auto got = shared_socket->receiveMessage();
+            if (!got) break;   // (an error comes again, in the loop)
+            auto& data = got.value().first;
+            // A wheel's turns scroll now; a pointer's move is known (a wheel goes by where
+            // it is), and has its effect later.
+            bool wheels = !data.empty() && data.size() % sizeof(shared::InputMessage) == 0;
+            if (wheels && data.size() >= sizeof(shared::XBusMessage) && reinterpret_cast<const shared::XBusMessage*>(data.data())->magic_ == shared::XBUS_MAGIC) wheels = false;
+            const auto* raws = reinterpret_cast<const shared::InputMessage*>(data.data());
+            const size_t count = data.size() / sizeof(shared::InputMessage);
+            if (wheels)
+                for (size_t i = 0; i < count; ++i) {
+                    if (raws[i].type_ == shared::InputEventType::MouseMove) {
+                        g_cursor_x = std::clamp(static_cast<float>(raws[i].value_a_), 0.0f, static_cast<float>(window_w));
+                        g_cursor_y = std::clamp(static_cast<float>(raws[i].value_b_), 0.0f, static_cast<float>(window_h));
+                    }
+                    if (raws[i].type_ != shared::InputEventType::MouseWheel) wheels = false;
+                }
+            if (wheels && !getPointerCapture()) {
+                for (size_t i = 0; i < count; ++i) (void)root_element->handleEvent(raws[i]);
+            } else {
+                held.push_back(std::move(got));
+            }
+        }
+        std::vector<std::function<bool()>> moving;
+        moving.swap(g_scrollers);
+        bool any = false;
+        for (auto& step : moving) {
+            any = true;
+            if (step()) g_scrollers.push_back(std::move(step));
+        }
+        if (any) present(root);
+    };
+
     // --- Main Application Loop ---
     while (true) {
         if (drew && !*theme_applied && theme_retries_left > 0 && ++theme_retry_frames >= 6) {
@@ -893,12 +981,12 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
             }
             bool posted_pending;
             { std::lock_guard<std::mutex> lk(g_post_mu); posted_pending = !g_posted.empty(); }
-            if (posted_pending) timeout_ms = 0;
+            if (posted_pending || !held.empty()) timeout_ms = 0;
             struct pollfd pfd[2] = {{shared_socket->fd(), POLLIN, 0}, {g_wake_pipe[0], POLLIN, 0}};
             (void)::poll(pfd, g_wake_pipe[0] >= 0 ? 2 : 1, timeout_ms);
             const bool due = g_wake_at && std::chrono::steady_clock::now() >= *g_wake_at;
             if (due) g_wake_at.reset();
-            only_woken = due && !posted_pending && !(pfd[0].revents & POLLIN) && !ticker.hasActiveAnimations() &&
+            only_woken = due && !posted_pending && held.empty() && !(pfd[0].revents & POLLIN) && !ticker.hasActiveAnimations() &&
                          !(g_wake_pipe[0] >= 0 && (pfd[1].revents & POLLIN));
             if (g_wake_pipe[0] >= 0 && (pfd[1].revents & POLLIN)) {
                 char buf[64];
@@ -912,7 +1000,8 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
 
         // Drain all pending IPC messages
         while (true) {
-            auto msg_res = shared_socket->receiveMessage();
+            auto msg_res = held.empty() ? shared_socket->receiveMessage() : std::move(held.front());
+            if (!held.empty()) held.pop_front();
             if (msg_res) {
                 auto& data = msg_res.value().first;
                 // Intercept DnD messages before the generic XBus handler so they
@@ -1131,7 +1220,8 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
             for (auto& fn : posted) if (fn) fn();
         }
         if (g_frame_cb) g_frame_cb();   // before this frame's sync and layout
-        if (only_woken && g_draw_needed && !g_draw_needed() &&
+        const bool wanted = std::exchange(g_frame_wanted, false);
+        if (only_woken && !wanted && g_draw_needed && !g_draw_needed() &&
             std::chrono::steady_clock::now() - last_draw < std::chrono::milliseconds(kIdleFrameMs)) {
             drew = false;
             continue;
@@ -1183,28 +1273,7 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
             }
         }
 
-        // Render and Export frame
-        auto frame = renderer.paint(root_node);
-        auto dmabuf_fd = frame.exportDmabuf();
-
-        if (dmabuf_fd.isValid()) {
-            shared::RenderMessage frame_msg{
-                .surface_id_ = my_surface_id,
-                .status_ = shared::RenderMessageStatus::FrameReady,
-                .width_ = (uint32_t)window_w,
-                .height_ = (uint32_t)window_h,
-                .damage_x_ = frame.damage_x_,
-                .damage_y_ = frame.damage_y_,
-                .damage_width_ = frame.damage_width_,
-                .damage_height_ = frame.damage_height_,
-                .buffer_index_ = frame.buffer_index_
-            };
-            std::span<const uint8_t> payload(reinterpret_cast<const uint8_t*>(&frame_msg), sizeof(frame_msg));
-            auto send_res = shared_socket->sendMessage(payload, dmabuf_fd.get());
-            if (!send_res) {
-                LOG_ERROR("Failed to send FrameReady: {}", send_res.error().message());
-            }
-        }
+        present(root_node);
 
         // Pacing is handled by the poll() at the top of the loop — no fixed
         // trailing sleep, so input is serviced as soon as it arrives.

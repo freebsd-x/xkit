@@ -806,9 +806,8 @@ public:
                                                child_max_w, 0.0f, 100000.0f});
         Size ourSize = fixedOr(constraints.clamp(childSize));
         // Clamp scroll so we never show empty space below content.
-        float max_scroll = std::max(0.0f, childSize.height_ - ourSize.height_);
-        scroll_y_ = std::min(scroll_y_, max_scroll);
-        children_[0]->setOffset({0.0f, -scroll_y_});
+        max_scroll_ = std::max(0.0f, childSize.height_ - ourSize.height_);
+        applyScroll();
         return ourSize;
     }
 
@@ -851,9 +850,16 @@ public:
     void paintSelf(fbx::xrender::DisplayList&, Offset) noexcept override {}
 
     void setScrollY(float y) noexcept { scroll_y_ = std::max(0.0f, y); }
+    // Its content moved to where it's scrolled, as far as it was last laid out to go.
+    void applyScroll() noexcept {
+        scroll_y_ = std::min(scroll_y_, max_scroll_);
+        if (!children_.empty()) children_[0]->setOffset({0.0f, -scroll_y_});
+    }
+    [[nodiscard]] bool atEnd(float direction) const noexcept { return direction < 0 ? scroll_y_ <= 0 : scroll_y_ >= max_scroll_; }
     [[nodiscard]] float getScrollY() const noexcept { return scroll_y_; }
 private:
     float scroll_y_{0.0f};
+    float max_scroll_{0.0f};
 };
 
 // Horizontal counterpart of RenderScrollView: lays its single child out at its

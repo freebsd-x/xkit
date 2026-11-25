@@ -1430,8 +1430,18 @@ public:
 
     [[nodiscard]] bool handleEvent(const shared::InputMessage& event) noexcept override {
         if (event.type_ == shared::InputEventType::MouseWheel) {
-            // Add impulse; physics runs in syncState() each frame.
+            // An impulse; it runs down by the time gone by (momentum), each frame and,
+            // while something keeps the UI thread, in XApplication::breathe.
             velocity_y_ += event.value_b_ * 60.0f;
+            if (!moving_) {
+                moving_ = true;
+                last_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(16);
+                XApplication::addScroller([weak = weak_from_this()] {
+                    auto self = std::static_pointer_cast<ScrollViewElement>(weak.lock());
+                    return self && self->advance();
+                });
+            }
+            XApplication::requestFrame();
             return true;
         }
         // Forward all other events to the scrollable content.
@@ -1440,18 +1450,36 @@ public:
     }
 
     void syncState() noexcept override {
-        // Momentum: apply velocity then decay (exponential, ~0.88 per frame @ 60fps)
-        if (std::abs(velocity_y_) > 0.5f) {
-            auto scroll_node = std::static_pointer_cast<RenderScrollView>(renderNode_);
-            scroll_node->setScrollY(scroll_node->getScrollY() + velocity_y_);
-            velocity_y_ *= kDecay;
-        } else {
-            velocity_y_ = 0.0f;
-        }
+        (void)advance();
         SingleChildElement::syncState();
     }
 
 private:
+    // True while it's still moving.
+    bool advance() noexcept {
+        if (!moving_) return false;
+        const auto now = std::chrono::steady_clock::now();
+        // In frames of a sixtieth; a long stop doesn't throw it far.
+        const float frames = std::min(std::chrono::duration<float>(now - last_).count() * 60.0f, 6.0f);
+        last_ = now;
+        auto scroll_node = std::static_pointer_cast<RenderScrollView>(renderNode_);
+        // (The sum of what each frame would have moved it.)
+        const float left = std::pow(kDecay, frames);
+        scroll_node->setScrollY(scroll_node->getScrollY() + velocity_y_ * (1.0f - left) / (1.0f - kDecay));
+        scroll_node->applyScroll();
+        velocity_y_ *= left;
+        if (std::abs(velocity_y_) < 0.5f || scroll_node->atEnd(velocity_y_)) {
+            velocity_y_ = 0.0f;
+            moving_ = false;
+            XApplication::requestFrame();   // the last of it drawn
+            return false;
+        }
+        XApplication::requestFrame();
+        return true;
+    }
+
+    bool moving_ = false;
+    std::chrono::steady_clock::time_point last_{};
     static constexpr float kDecay = 0.88f;
     float velocity_y_{0.0f};
 };
