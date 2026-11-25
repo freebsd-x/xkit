@@ -828,6 +828,8 @@ int XApplication::Run(std::shared_ptr<Widget> root, const std::string& socket_pa
         (void)fbx::xrender::FontManager::getEmojiFace();
         (void)fbx::xrender::FontManager::getCjkFace();      // Japanese and Chinese text (and Korean's rest)
         (void)fbx::xrender::FontManager::getHangulFace();   // Korean text: its own font first
+        (void)fbx::xrender::FontManager::getHangulFace(true);   // and their bolds
+        (void)fbx::xrender::FontManager::getCjkFace(true);
         (void)fbx::xrender::FontManager::getLastResortFace();
 
         // Read the time zone now: libc loads it on first use, and in the sandbox
