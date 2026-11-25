@@ -1,3 +1,4 @@
+#include <cmath>
 #include "xkit/engine.h"
 #include <unordered_map>
 #include <algorithm>
@@ -395,10 +396,11 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
         if (cmd.type_ == fbx::shared::CommandType::SetScissor) {
             const auto* sd = reinterpret_cast<const fbx::shared::ScissorData*>(
                 dl.getDataBuffer().data() + cmd.data_offset_);
-            VkRect2D sc = {
-                { static_cast<int32_t>(sd->x_), static_cast<int32_t>(sd->y_) },
-                { static_cast<uint32_t>(sd->width_), static_cast<uint32_t>(sd->height_) }
-            };
+            // To the pixel edges nearest its own, each (x and width cut to whole ones apart
+            // came up to two short of its right edge), and within the window.
+            const auto edge = [](float v, uint32_t max) { return static_cast<int32_t>(std::lround(std::clamp(v, 0.0f, static_cast<float>(max)))); };
+            const int32_t x0 = edge(sd->x_, w), y0 = edge(sd->y_, h), x1 = edge(sd->x_ + sd->width_, w), y1 = edge(sd->y_ + sd->height_, h);
+            VkRect2D sc = {{x0, y0}, {static_cast<uint32_t>(std::max(0, x1 - x0)), static_cast<uint32_t>(std::max(0, y1 - y0))}};
             vkCmdSetScissor(command_buffer_, 0, 1, &sc);
         } else if (cmd.type_ == fbx::shared::CommandType::ResetScissor) {
             VkRect2D sc = {{0, 0}, {w, h}};
