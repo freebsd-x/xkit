@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string>
 
 // HTTP(S) for apps, through com.freebsdx.Fetch: a sandboxed app can't open
@@ -61,6 +62,16 @@ WebFetchResult postWebBlocking(const std::string& url, const std::string& conten
 WebFetchResult scriptWebBlocking(const std::string& method, const std::string& url,
                                  const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body, bool cookies,
                                  std::chrono::milliseconds timeout = std::chrono::seconds(60)) noexcept;
+
+// Browsing carried on in a new process: a browser process is one site's (the compositor
+// sends cookies for no other), so a link to another site opens in a new one, which
+// takes this one's window. `state` is the browser's own (where to go, its history).
+// UI thread. `done(true)` once the new process has it: this one should then go;
+// `done(false)` if it couldn't be started.
+void handOffBrowsing(const std::string& state, std::function<void(bool taken)> done) noexcept;
+// The new process's side: what came with "xweb-handoff:<token>". UI thread; `done`
+// gets nothing if the token is unknown or used.
+void takeBrowsing(const std::string& token, std::function<void(std::optional<std::string>)> done) noexcept;
 
 // A TCP connection, for what fetch can't carry (Mail's IMAP and SMTP). The app's
 // sandbox can't open sockets, so the compositor connects, if policy allows that

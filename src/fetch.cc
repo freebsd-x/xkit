@@ -190,6 +190,51 @@ WebFetchResult scriptWebBlocking(const std::string& method, const std::string& u
     return webBlocking(url, std::move(request), timeout, cookies, true);
 }
 
+void handOffBrowsing(const std::string& state, std::function<void(bool)> done) noexcept {
+    XBusClient* bus = XApplication::getBus();
+    xserver::UniqueFd fd(bus && !state.empty() ? shm_open(SHM_ANON, O_RDWR | O_CLOEXEC, 0600) : -1);
+    void* map = MAP_FAILED;
+    if (fd && ::ftruncate(fd.get(), static_cast<off_t>(state.size())) == 0)
+        map = ::mmap(nullptr, state.size(), PROT_WRITE, MAP_SHARED, fd.get(), 0);
+    if (map == MAP_FAILED) {
+        if (done) done(false);
+        return;
+    }
+    std::memcpy(map, state.data(), state.size());
+    ::munmap(map, state.size());
+    shared::FetchRequest req{};
+    bus->Call("com.freebsdx.Fetch", static_cast<uint32_t>(shared::FetchOpcode::Handoff),
+              {reinterpret_cast<const uint8_t*>(&req), sizeof(req)},
+              [done = std::move(done)](const shared::XBusMessage& m) {
+                  shared::FetchReply rep{};
+                  std::memcpy(&rep, m.payload_, sizeof(rep));
+                  if (done) done(rep.status_ == static_cast<int32_t>(shared::FetchStatus::Ok));
+              },
+              std::move(fd));
+}
+
+void takeBrowsing(const std::string& token, std::function<void(std::optional<std::string>)> done) noexcept {
+    XBusClient* bus = XApplication::getBus();
+    shared::FetchRequest req{};
+    if (!bus || token.empty() || token.size() >= sizeof(req.url_)) {
+        if (done) done(std::nullopt);
+        return;
+    }
+    std::memcpy(req.url_, token.data(), token.size());
+    bus->Call("com.freebsdx.Fetch", static_cast<uint32_t>(shared::FetchOpcode::TakeHandoff),
+              {reinterpret_cast<const uint8_t*>(&req), sizeof(req)},
+              [bus, done = std::move(done)](const shared::XBusMessage& m) {
+                  shared::FetchReply rep{};
+                  std::memcpy(&rep, m.payload_, sizeof(rep));
+                  auto fd = bus->takeIncomingFd();
+                  if (rep.status_ != static_cast<int32_t>(shared::FetchStatus::Ok) || !fd) {
+                      if (done) done(std::nullopt);
+                      return;
+                  }
+                  if (done) done(readBody(fd.get(), rep.size_));
+              });
+}
+
 FetchResult fetchBlocking(const std::string& url, std::chrono::milliseconds timeout) noexcept {
     if (XApplication::onUiThread()) return {};
     auto promise = std::make_shared<std::promise<FetchResult>>();
