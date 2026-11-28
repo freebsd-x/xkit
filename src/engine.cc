@@ -367,6 +367,7 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
         // two): the glyphs a frame of new text needs are then made in one go, their
         // distance fields side by side (a page of Korean is hundreds at once).
         std::vector<std::pair<xrender::FontFace*, std::string>> fresh;
+        std::vector<std::pair<xrender::FontFace*, std::string>> runs;   // each new run, as it'll be drawn
         for (const auto& cmd : dl.getCommands()) {
             if (cmd.type_ != fbx::shared::CommandType::DrawText) continue;
             const auto* td = reinterpret_cast<const fbx::shared::TextData*>(
@@ -376,12 +377,37 @@ RenderResult VulkanEngine::paint(std::shared_ptr<RenderNode> root) {
             // Shaped before: its glyphs went into the atlas then (which keeps them).
             xrender::FontFace* face = faceFor(td);
             if (shapedRunCached(face, text)) continue;
+            runs.emplace_back(face, text);
             auto it = std::find_if(fresh.begin(), fresh.end(), [&](const auto& f) { return f.first == face; });
             if (it == fresh.end()) it = fresh.insert(fresh.end(), {face, std::string{}});
             it->second += text;
             it->second += ' ';
         }
         for (const auto& [face, text] : fresh) xrender::FontManager::ensureGlyphs(text, face, *font_atlas_);
+        // Shaped together, neighbours can change a glyph: Inter's colon between digits is
+        // its raised one even with spaces between, so a letter-spaced "15:37", drawn a
+        // letter at a time, wanted the plain colon nothing had made (ted.com's durations
+        // lost their colons). The glyphs each run is drawn with, too.
+        {
+            std::vector<std::pair<uint32_t, std::vector<uint32_t>>> missing;
+            for (const auto& [face, text] : runs) {
+                if (!face) continue;
+                for (const auto& g : shapedRun(face, text)) {
+                    if (g.glyph_index_ == 0 || font_atlas_->lookup(g.face_id_, g.glyph_index_)) continue;
+                    auto it = std::find_if(missing.begin(), missing.end(), [&](const auto& m) { return m.first == g.face_id_; });
+                    if (it == missing.end()) it = missing.insert(missing.end(), {g.face_id_, {}});
+                    if (std::find(it->second.begin(), it->second.end(), g.glyph_index_) == it->second.end()) it->second.push_back(g.glyph_index_);
+                }
+            }
+            auto* emoji = xrender::FontManager::getEmojiFace();
+            for (const auto& [face_id, ids] : missing) {
+                FT_Face ft = nullptr;
+                for (const auto& [face, text] : runs)
+                    if (face && face->face_id_ == face_id) { ft = face->ft_face_; break; }
+                if (!ft && emoji && emoji->face_id_ == face_id) ft = emoji->ft_face_;
+                if (ft) font_atlas_->addGlyphs(ft, face_id, ids);
+            }
+        }
         if (font_atlas_->isDirty()) {
             reuploadFontAtlas();
             font_atlas_->clearDirty();
