@@ -5,6 +5,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_MULTIPLE_MASTERS_H
 #include "xkit/widget.h"
 #include "xkit/render_node.h"
 #include "shared/logger.h"
@@ -294,6 +295,20 @@ static int faceWeight(const xrender::FontFace* f) noexcept {
     int w = (f->ft_face_->style_flags & FT_STYLE_FLAG_BOLD) ? 700 : 400;
     if (const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(f->ft_face_, FT_SFNT_OS2)); os2 && os2->version != 0xFFFF && os2->usWeightClass > 0)
         w = os2->usWeightClass;
+    // A variable font is as heavy as its weight axis was set (the font manager set it to
+    // the weight asked for): its OS/2 class is the default instance's, often the lightest
+    // (Source Sans 3's 200, Pretendard's 100), and bold drawn twice on a real bold came
+    // out black (coursera.org's, hani.co.kr's headings).
+    if (FT_HAS_MULTIPLE_MASTERS(f->ft_face_)) {
+        FT_MM_Var* mm = nullptr;
+        if (FT_Get_MM_Var(f->ft_face_, &mm) == 0 && mm) {
+            std::vector<FT_Fixed> coords(mm->num_axis);
+            if (FT_Get_Var_Design_Coordinates(f->ft_face_, mm->num_axis, coords.data()) == 0)
+                for (FT_UInt i = 0; i < mm->num_axis; ++i)
+                    if (mm->axis[i].tag == FT_MAKE_TAG('w', 'g', 'h', 't')) w = static_cast<int>(coords[i] >> 16);
+            FT_Done_MM_Var(f->ft_lib_, mm);
+        }
+    }
     known[f->face_id_] = w;
     return w;
 }
